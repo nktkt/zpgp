@@ -131,6 +131,106 @@ src/
 | Hash | SHA-1 (2), SHA-256 (8), SHA-384 (9), SHA-512 (10), SHA-224 (11) |
 | Compression | Uncompressed (0), ZIP (1), ZLIB (2) |
 
+## Roadmap
+
+Current state: **13,101 LOC** | 51 source files | 327 tests | RFC 4880 partial coverage
+
+### v0.2 -- GnuPG Interoperability (~20,000 LOC)
+
+End-to-end interop with GnuPG: generate keys, sign/verify, encrypt/decrypt across both tools.
+
+| Task | Est. LOC | Status |
+|------|---------|--------|
+| RSA key generation (Miller-Rabin prime finding) | +1,500 | Planned |
+| Full `keygen` CLI command (RSA, Ed25519) | +800 | Planned |
+| Working `sign` / `verify` CLI commands | +600 | Planned |
+| Working `encrypt` / `decrypt` CLI commands | +600 | Planned |
+| Secret key encryption/decryption with passphrase | +500 | Planned |
+| SEIPD encrypt/decrypt integration (wire up CFB + MDC) | +800 | Planned |
+| GnuPG cross-verification test suite | +1,500 | Planned |
+| DSA sign/verify support | +400 | Planned |
+| **Subtotal** | **+6,700** | |
+
+### v0.3 -- RFC 4880 Full Compliance (~30,000 LOC)
+
+Complete RFC 4880 implementation with edge cases and robustness.
+
+| Task | Est. LOC | Status |
+|------|---------|--------|
+| V3 packet/signature support (legacy compat) | +1,500 | Planned |
+| Cleartext Signature Framework (RFC 4880 Section 7) | +800 | Planned |
+| Detached signatures | +400 | Planned |
+| Full subkey lifecycle (create, bind, revoke, select) | +1,000 | Planned |
+| Designated revoker support | +400 | Planned |
+| Key expiration enforcement | +300 | Planned |
+| Notation data subpackets | +200 | Planned |
+| Regular expression trust signatures | +300 | Planned |
+| ElGamal encryption support | +600 | Planned |
+| TripleDES implementation | +400 | Planned |
+| BZip2 compression | +300 | Planned |
+| Keyring file I/O (GPG format compat) | +800 | Planned |
+| HKP keyserver HTTP client (live network) | +600 | Planned |
+| Comprehensive error messages and diagnostics | +500 | Planned |
+| Property-based and fuzz testing | +2,000 | Planned |
+| **Subtotal** | **+10,100** | |
+
+### v0.4 -- RFC 9580 (Crypto Refresh) (~45,000 LOC)
+
+Adopt the modern OpenPGP standard for forward compatibility.
+
+| Task | Est. LOC | Status |
+|------|---------|--------|
+| V6 key and signature packet support | +2,000 | Planned |
+| V2 SEIPD (AEAD encrypted data) | +1,500 | Planned |
+| AEAD modes: EAX, OCB, GCM | +2,000 | Planned |
+| X25519 / Ed25519 native key types (not legacy ECDH) | +800 | Planned |
+| X448 / Ed448 support | +600 | Planned |
+| Argon2 S2K (memory-hard KDF) | +800 | Planned |
+| V6 fingerprint (SHA-256) | +300 | Planned |
+| Padding packet (Tag 21) | +100 | Planned |
+| SEIPDv2 mandatory AEAD enforcement | +400 | Planned |
+| RFC 9580 test vectors and interop testing | +2,000 | Planned |
+| Deprecation warnings for insecure algorithms | +300 | Planned |
+| **Subtotal** | **+10,800** | |
+
+### v1.0 -- Production Ready (~60,000+ LOC)
+
+Hardened, auditable, production-grade library.
+
+| Task | Est. LOC | Status |
+|------|---------|--------|
+| Constant-time operations audit | +500 | Planned |
+| Memory zeroization for secret material | +400 | Planned |
+| Side-channel resistance review | +300 | Planned |
+| Streaming API for large messages | +1,500 | Planned |
+| Async I/O support | +800 | Planned |
+| WKD (Web Key Directory) client | +600 | Planned |
+| Autocrypt header support | +400 | Planned |
+| PKCS#11 / hardware token interface | +1,200 | Planned |
+| C ABI for FFI consumers | +1,000 | Planned |
+| API documentation and examples | +2,000 | Planned |
+| Conformance test suite (OpenPGP interop) | +3,000 | Planned |
+| Performance benchmarks vs GnuPG/Sequoia | +500 | Planned |
+| Formal security audit | -- | Planned |
+| **Subtotal** | **+12,200** | |
+
+### Comparative Scale
+
+```
+LOC (thousands)
+0    10    20    30    40    50    60    70    80   ...  350+
+|-----|-----|-----|-----|-----|-----|-----|-----|------>|
+[####]                                                     zpgp v0.1 (13k)
+[##########]                                               zpgp v0.2 (20k)
+[#####################]                                    zpgp v0.3 (30k)
+[##############################]                           zpgp v0.4 (45k)
+[##########################################]               zpgp v1.0 (60k)
+[##############################]                           Sequoia v1.0 (44k)
+[###################################]                      OpenPGP.js (53k)
+[##############################################]           GopenPGP (50k)
+[#########################################################]  ... GnuPG (350k+)
+```
+
 ## Standards
 
 - [RFC 4880](https://datatracker.ietf.org/doc/html/rfc4880) -- OpenPGP Message Format
