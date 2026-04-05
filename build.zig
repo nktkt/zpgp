@@ -23,6 +23,33 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // --- C shared library (libzpgp) ---
+    // Uses root.zig as the module root so the cabi module can access
+    // all zpgp sub-modules. The `export` functions in cabi/zpgp.zig
+    // are automatically exported as C symbols.
+    const lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zpgp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(lib);
+
+    // --- C static library (libzpgp_static) ---
+    const static_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zpgp_static",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(static_lib);
+
     const run_step = b.step("run", "Run the zpgp CLI");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);

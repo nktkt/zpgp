@@ -113,9 +113,36 @@ pub const decompose = @import("message/decompose.zig");
 pub const v6_compose = @import("message/v6_compose.zig");
 pub const v6_decompose = @import("message/v6_decompose.zig");
 
+// Streaming API
+pub const streaming = @import("streaming/mod.zig");
+
+// Security utilities
+pub const zeroize = @import("security/zeroize.zig");
+
+// C ABI (FFI)
+pub const cabi = @import("cabi/zpgp.zig");
+
 // WKD and Autocrypt
 pub const wkd = @import("wkd.zig");
 pub const autocrypt = @import("autocrypt.zig");
+
+// Inspection and analysis
+pub const inspect = @import("inspect/mod.zig");
+
+// Protocol validation
+pub const protocol = @import("protocol/mod.zig");
+
+// Utility modules
+pub const utils = @import("utils/mod.zig");
+
+// Policy modules
+pub const algorithm_policy = @import("policy/algorithm_policy.zig");
+pub const compliance = @import("policy/compliance.zig");
+
+// Example modules
+pub const example_encrypt_decrypt = @import("examples/encrypt_decrypt.zig");
+pub const example_key_management = @import("examples/key_management.zig");
+pub const example_signatures = @import("examples/signatures.zig");
 
 // Integration tests
 pub const test_interop = @import("test_interop.zig");
@@ -128,6 +155,16 @@ pub const test_packet_roundtrip = @import("test_packet_roundtrip.zig");
 pub const test_key_lifecycle = @import("test_key_lifecycle.zig");
 pub const test_message_roundtrip = @import("test_message_roundtrip.zig");
 pub const test_subpacket_exhaustive = @import("test_subpacket_exhaustive.zig");
+pub const test_conformance = @import("test_conformance.zig");
+pub const test_edge_cases = @import("test_edge_cases.zig");
+pub const test_security = @import("test_security.zig");
+pub const test_performance = @import("test_performance.zig");
+pub const test_interop_v6 = @import("test_interop_v6.zig");
+pub const test_utils = @import("test_utils.zig");
+pub const test_policy = @import("test_policy.zig");
+pub const test_examples = @import("test_examples.zig");
+pub const test_inspect = @import("test_inspect.zig");
+pub const test_protocol = @import("test_protocol.zig");
 
 // Re-exports for convenience.
 pub const PublicKeyAlgorithm = enums.PublicKeyAlgorithm;
@@ -139,6 +176,13 @@ pub const Mpi = mpi.Mpi;
 pub const KeyId = key_id.KeyId;
 pub const Fingerprint = key_id.Fingerprint;
 pub const Timestamp = time.Timestamp;
+
+// Force C ABI symbol exports when built as a library.
+// Referencing the cabi module at comptime ensures the `export fn`
+// declarations within it are included in the compilation output.
+comptime {
+    _ = cabi;
+}
 
 test {
     // Pull in tests from all sub-modules.

@@ -9,6 +9,8 @@ const decompose_mod = zpgp.decompose;
 const enums = zpgp.enums;
 const keygen_mod = zpgp.keygen;
 const PublicKeyAlgorithm = zpgp.PublicKeyAlgorithm;
+const inspect_mod = zpgp.inspect;
+const protocol_mod = zpgp.protocol;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -50,6 +52,8 @@ pub fn main() !void {
         } else {
             printKeyUsage();
         }
+    } else if (std.mem.eql(u8, command, "inspect")) {
+        try cmdInspect(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "armor")) {
         try cmdArmor(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "dearmor")) {
@@ -78,6 +82,7 @@ fn printUsage() void {
         \\  encrypt   Encrypt a file
         \\  decrypt   Decrypt a file
         \\  key       Key management (import, export, list)
+        \\  inspect   Inspect OpenPGP data (packets, keys, messages)
         \\  armor     ASCII-armor binary data
         \\  dearmor   Remove ASCII armor
         \\  version   Show version information
@@ -232,6 +237,165 @@ fn cmdKeyExport(args: []const []const u8) void {
     _ = args;
     const stderr = std.fs.File.stderr();
     stderr.writeAll("key export: not yet implemented\n") catch {};
+}
+
+// ---------------------------------------------------------------------------
+// Inspect command
+// ---------------------------------------------------------------------------
+
+fn cmdInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const stdout = std.fs.File.stdout();
+    const w = stdout.deprecatedWriter();
+    const stderr = std.fs.File.stderr();
+    const ew = stderr.deprecatedWriter();
+
+    var mode: enum { packets, key_info, key_analyze, message_info, message_analyze, validate_key, validate_msg } = .packets;
+    var file_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--packets") or std.mem.eql(u8, args[i], "-p")) {
+            mode = .packets;
+        } else if (std.mem.eql(u8, args[i], "--key") or std.mem.eql(u8, args[i], "-k")) {
+            mode = .key_info;
+        } else if (std.mem.eql(u8, args[i], "--key-analyze") or std.mem.eql(u8, args[i], "-K")) {
+            mode = .key_analyze;
+        } else if (std.mem.eql(u8, args[i], "--message") or std.mem.eql(u8, args[i], "-m")) {
+            mode = .message_info;
+        } else if (std.mem.eql(u8, args[i], "--message-analyze") or std.mem.eql(u8, args[i], "-M")) {
+            mode = .message_analyze;
+        } else if (std.mem.eql(u8, args[i], "--validate-key")) {
+            mode = .validate_key;
+        } else if (std.mem.eql(u8, args[i], "--validate-msg")) {
+            mode = .validate_msg;
+        } else {
+            file_path = args[i];
+        }
+    }
+
+    if (file_path == null) {
+        stderr.writeAll(
+            \\Usage: zpgp inspect [options] <file>
+            \\
+            \\Options:
+            \\  --packets, -p         Dump packet structure (default)
+            \\  --key, -k             Inspect key properties
+            \\  --key-analyze, -K     Analyze key security
+            \\  --message, -m         Inspect message properties
+            \\  --message-analyze, -M Analyze message security
+            \\  --validate-key        Validate transferable key structure
+            \\  --validate-msg        Validate message grammar
+            \\
+        ) catch {};
+        return;
+    }
+
+    const data = readInputFile(allocator, file_path.?) catch |err| {
+        ew.print("Error reading file '{s}': {}\n", .{ file_path.?, err }) catch {};
+        return;
+    };
+    defer allocator.free(data);
+
+    switch (mode) {
+        .packets => {
+            const packets = inspect_mod.inspectPackets(allocator, data) catch |err| {
+                ew.print("Error inspecting packets: {}\n", .{err}) catch {};
+                return;
+            };
+            defer {
+                for (packets) |p| p.deinit(allocator);
+                allocator.free(packets);
+            }
+            const dump = inspect_mod.formatPacketDump(allocator, packets) catch |err| {
+                ew.print("Error formatting dump: {}\n", .{err}) catch {};
+                return;
+            };
+            defer allocator.free(dump);
+            try w.writeAll(dump);
+        },
+        .key_info => {
+            var ki = inspect_mod.inspectKey(allocator, data) catch |err| {
+                ew.print("Error inspecting key: {}\n", .{err}) catch {};
+                return;
+            };
+            defer ki.deinit(allocator);
+            const output = ki.format(allocator) catch |err| {
+                ew.print("Error formatting key info: {}\n", .{err}) catch {};
+                return;
+            };
+            defer allocator.free(output);
+            try w.writeAll(output);
+        },
+        .key_analyze => {
+            var analysis = inspect_mod.analyzeKey(allocator, data) catch |err| {
+                ew.print("Error analyzing key: {}\n", .{err}) catch {};
+                return;
+            };
+            defer analysis.deinit(allocator);
+            const output = analysis.format(allocator) catch |err| {
+                ew.print("Error formatting analysis: {}\n", .{err}) catch {};
+                return;
+            };
+            defer allocator.free(output);
+            try w.writeAll(output);
+        },
+        .message_info => {
+            var mi = inspect_mod.inspectMessage(allocator, data) catch |err| {
+                ew.print("Error inspecting message: {}\n", .{err}) catch {};
+                return;
+            };
+            defer mi.deinit(allocator);
+            try w.print("Message Inspection:\n", .{});
+            try w.print("  Encrypted: {s}\n", .{if (mi.is_encrypted) "yes" else "no"});
+            try w.print("  Signed:    {s}\n", .{if (mi.is_signed) "yes" else "no"});
+            try w.print("  Armored:   {s}\n", .{if (mi.is_armored) "yes" else "no"});
+            if (mi.encryption_type) |et| try w.print("  Enc Type:  {s}\n", .{et});
+            if (mi.sym_algo) |sa| try w.print("  Cipher:    {s}\n", .{sa});
+            if (mi.aead_algo) |aa| try w.print("  AEAD:      {s}\n", .{aa});
+            if (mi.seipd_version) |sv| try w.print("  SEIPD Ver: {d}\n", .{sv});
+            try w.print("  Recipients: {d}\n", .{mi.recipient_key_ids.len});
+            for (mi.recipient_key_ids) |kid| {
+                try w.print("    {s}\n", .{kid});
+            }
+        },
+        .message_analyze => {
+            var ma = inspect_mod.analyzeMessage(allocator, data) catch |err| {
+                ew.print("Error analyzing message: {}\n", .{err}) catch {};
+                return;
+            };
+            defer ma.deinit(allocator);
+            const output = ma.format(allocator) catch |err| {
+                ew.print("Error formatting analysis: {}\n", .{err}) catch {};
+                return;
+            };
+            defer allocator.free(output);
+            try w.writeAll(output);
+        },
+        .validate_key => {
+            var result = protocol_mod.TransferableKeyValidator.validate(allocator, data) catch |err| {
+                ew.print("Error validating key: {}\n", .{err}) catch {};
+                return;
+            };
+            defer result.deinit(allocator);
+            const output = result.format(allocator) catch |err| {
+                ew.print("Error formatting result: {}\n", .{err}) catch {};
+                return;
+            };
+            defer allocator.free(output);
+            try w.writeAll(output);
+        },
+        .validate_msg => {
+            var result = protocol_mod.validateMessageGrammar(allocator, data) catch |err| {
+                ew.print("Error validating message: {}\n", .{err}) catch {};
+                return;
+            };
+            defer result.deinit(allocator);
+            try w.print("Message Grammar Validation: {s}\n", .{if (result.valid) "VALID" else "INVALID"});
+            for (result.errors.items) |err_msg| {
+                try w.print("  {s}\n", .{err_msg});
+            }
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
