@@ -36,6 +36,10 @@ pub const PacketTag = enum(u8) {
     sym_encrypted_integrity_protected_data = 18,
     /// Modification Detection Code Packet (Tag 19)
     modification_detection_code = 19,
+    /// AEAD Encrypted Data Packet (Tag 20, RFC 9580 draft - deprecated)
+    aead_encrypted_data = 20,
+    /// Padding Packet (Tag 21, RFC 9580)
+    padding = 21,
     /// Catch-all for unknown/reserved tag values.
     _,
 
@@ -59,6 +63,8 @@ pub const PacketTag = enum(u8) {
             .user_attribute => "User Attribute",
             .sym_encrypted_integrity_protected_data => "Sym. Encrypted Integrity Protected Data",
             .modification_detection_code => "Modification Detection Code",
+            .aead_encrypted_data => "AEAD Encrypted Data",
+            .padding => "Padding",
             _ => "Unknown",
         };
     }

@@ -154,9 +154,11 @@ pub const Aes256Cfb = OpenPgpCfb(aes.Aes256);
 
 const Cast5 = @import("cast5.zig").Cast5;
 const Twofish = @import("twofish.zig").Twofish;
+const TripleDes = @import("triple_des.zig").TripleDes;
 
 pub const Cast5Cfb = OpenPgpCfbDirect(Cast5);
 pub const TwofishCfb = OpenPgpCfbDirect(Twofish);
+pub const TripleDesCfb = OpenPgpCfbDirect(TripleDes);
 
 /// Generic OpenPGP CFB mode for ciphers that are their own encrypt context
 /// (i.e. `initEnc` returns the cipher itself, which has an `encrypt` method).
@@ -415,6 +417,43 @@ test "CAST5 CFB resyncing encrypt/decrypt round-trip" {
     try std.testing.expect(!std.mem.eql(u8, &buf, &plaintext));
 
     var dec = Cast5Cfb.init(key);
+    dec.decryptResync(&buf);
+
+    try std.testing.expectEqualSlices(u8, &plaintext, &buf);
+}
+
+test "TripleDES CFB non-resyncing encrypt/decrypt round-trip" {
+    const key = [_]u8{0x42} ** 24;
+    const plaintext = "Hello, OpenPGP TripleDES-CFB mode! Testing multiple blocks of data.";
+    var buf: [plaintext.len]u8 = undefined;
+    @memcpy(&buf, plaintext);
+
+    var enc = TripleDesCfb.init(key);
+    enc.encryptData(&buf);
+
+    try std.testing.expect(!std.mem.eql(u8, &buf, plaintext));
+
+    var dec = TripleDesCfb.init(key);
+    dec.decrypt(&buf);
+
+    try std.testing.expectEqualSlices(u8, plaintext, &buf);
+}
+
+test "TripleDES CFB resyncing encrypt/decrypt round-trip" {
+    const key = [_]u8{0xDE} ** 24;
+    const bs = TripleDesCfb.block_size;
+    const prefix = [_]u8{0xAA} ** bs ++ [_]u8{ 0xAA, 0xAA };
+    const body = "TripleDES resyncing CFB test message";
+    const plaintext = prefix ++ body.*;
+    var buf: [plaintext.len]u8 = undefined;
+    @memcpy(&buf, &plaintext);
+
+    var enc = TripleDesCfb.init(key);
+    enc.encryptResync(&buf);
+
+    try std.testing.expect(!std.mem.eql(u8, &buf, &plaintext));
+
+    var dec = TripleDesCfb.init(key);
     dec.decryptResync(&buf);
 
     try std.testing.expectEqualSlices(u8, &plaintext, &buf);

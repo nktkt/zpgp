@@ -21,6 +21,13 @@ const LiteralDataPacket = @import("../packets/literal_data.zig").LiteralDataPack
 const CompressedDataPacket = @import("../packets/compressed_data.zig").CompressedDataPacket;
 
 const Key = @import("../key/key.zig").Key;
+const rsa = @import("../crypto/rsa.zig");
+const seipd = @import("../crypto/seipd.zig");
+const session_key_mod = @import("../crypto/session_key.zig");
+const S2K = @import("../types/s2k.zig").S2K;
+const SymmetricAlgorithm = @import("../types/enums.zig").SymmetricAlgorithm;
+const sig_creation = @import("../signature/creation.zig");
+const sig_verification = @import("../signature/verification.zig");
 
 pub const DecomposeError = error{
     InvalidPacket,
@@ -31,6 +38,10 @@ pub const DecomposeError = error{
     OutOfMemory,
     EndOfStream,
     Overflow,
+    DecryptionFailed,
+    IntegrityCheckFailed,
+    NoMatchingKey,
+    UnsupportedAlgorithm,
 };
 
 /// A parsed OpenPGP message, broken into its constituent packet types.
@@ -256,34 +267,281 @@ fn collectPartialBody(
 
 /// Decrypt a parsed message using a secret key.
 ///
-/// This requires the crypto modules (CFB, session key) which are being
-/// created in parallel. Returns error.NotImplemented until those are available.
+/// Finds a matching PKESK packet, decrypts the session key with RSA,
+/// then decrypts the SEIPD data and parses the inner packets to extract
+/// the literal data plaintext.
 pub fn decryptWithKey(
     allocator: Allocator,
     msg: *const ParsedMessage,
     secret_key: *const Key,
     passphrase: ?[]const u8,
 ) DecomposeError![]u8 {
-    _ = allocator;
-    _ = msg;
-    _ = secret_key;
-    _ = passphrase;
-    return error.NotImplemented;
+    _ = passphrase; // TODO: decrypt secret key if encrypted
+
+    if (!msg.isEncrypted()) return error.MalformedMessage;
+    if (msg.pkesk_packets.items.len == 0) return error.NoMatchingKey;
+
+    const encrypted_data = msg.encrypted_data orelse return error.MalformedMessage;
+    const key_id = secret_key.keyId();
+
+    // Find a matching PKESK packet
+    var matched_pkesk: ?PKESKPacket = null;
+    for (msg.pkesk_packets.items) |pkesk| {
+        // Match by key ID (all zeros = wildcard)
+        if (mem.eql(u8, &pkesk.key_id, &key_id) or
+            mem.eql(u8, &pkesk.key_id, &[_]u8{0} ** 8))
+        {
+            matched_pkesk = pkesk;
+            break;
+        }
+    }
+
+    const pkesk = matched_pkesk orelse return error.NoMatchingKey;
+
+    // Decrypt the session key
+    switch (pkesk.algorithm) {
+        .rsa_encrypt_sign, .rsa_encrypt_only => {
+            if (pkesk.encrypted_session_key.len < 1) return error.DecryptionFailed;
+            if (secret_key.primary_key.key_material.len < 2) return error.DecryptionFailed;
+            if (secret_key.secret_key == null) return error.DecryptionFailed;
+
+            const sk = secret_key.secret_key.?;
+            const secret_data = sk.secret_data;
+
+            // Parse d MPI from secret data
+            if (secret_data.len < 2) return error.DecryptionFailed;
+            const d_bits = mem.readInt(u16, secret_data[0..2], .big);
+            const d_len: usize = if (d_bits == 0) 0 else ((@as(usize, d_bits) + 7) / 8);
+            if (2 + d_len > secret_data.len) return error.DecryptionFailed;
+            const d_data = secret_data[2 .. 2 + d_len];
+
+            const rsa_sk = rsa.RsaSecretKey{
+                .n_bytes = secret_key.primary_key.key_material[0].data,
+                .e_bytes = secret_key.primary_key.key_material[1].data,
+                .d_bytes = d_data,
+            };
+
+            // Decrypt the encrypted session key MPI
+            const decrypted_sk_data = rsa_sk.pkcs1v15Decrypt(
+                pkesk.encrypted_session_key[0].data,
+                allocator,
+            ) catch return error.DecryptionFailed;
+            defer allocator.free(decrypted_sk_data);
+
+            // Parse: algo_byte + session_key + 2-byte checksum
+            if (decrypted_sk_data.len < 3) return error.DecryptionFailed;
+            const algo_byte = decrypted_sk_data[0];
+            const sym_algo: SymmetricAlgorithm = @enumFromInt(algo_byte);
+            const sk_key_size = sym_algo.keySize() orelse return error.UnsupportedAlgorithm;
+
+            if (decrypted_sk_data.len < 1 + sk_key_size + 2) return error.DecryptionFailed;
+            const session_key_bytes = decrypted_sk_data[1 .. 1 + sk_key_size];
+
+            // Verify checksum
+            var cksum: u32 = 0;
+            for (session_key_bytes) |b| cksum += b;
+            const expected_cksum = mem.readInt(u16, decrypted_sk_data[1 + sk_key_size ..][0..2], .big);
+            if (@as(u16, @truncate(cksum)) != expected_cksum) return error.DecryptionFailed;
+
+            // Decrypt SEIPD
+            return decryptSeipdAndExtract(allocator, encrypted_data, session_key_bytes, sym_algo);
+        },
+        else => return error.UnsupportedAlgorithm,
+    }
 }
 
 /// Decrypt a parsed message using a passphrase (symmetric encryption).
 ///
-/// This requires the crypto modules (CFB, S2K) which are being created
-/// in parallel. Returns error.NotImplemented until those are available.
+/// Derives the key from the passphrase using the S2K specifier in the
+/// SKESK packet, then decrypts the SEIPD data.
 pub fn decryptWithPassphrase(
     allocator: Allocator,
     msg: *const ParsedMessage,
     passphrase: []const u8,
 ) DecomposeError![]u8 {
-    _ = allocator;
-    _ = msg;
-    _ = passphrase;
-    return error.NotImplemented;
+    if (!msg.isEncrypted()) return error.MalformedMessage;
+    if (msg.skesk_packets.items.len == 0) return error.DecryptionFailed;
+
+    const skesk = msg.skesk_packets.items[0];
+    const encrypted_data = msg.encrypted_data orelse return error.MalformedMessage;
+
+    const sym_algo = skesk.symmetric_algo;
+    const key_size = sym_algo.keySize() orelse return error.UnsupportedAlgorithm;
+
+    // Parse the S2K specifier
+    var s2k_fbs = std.io.fixedBufferStream(skesk.s2k_data);
+    const s2k = S2K.readFrom(s2k_fbs.reader()) catch return error.DecryptionFailed;
+
+    // Derive the key
+    var derived_key: [32]u8 = undefined;
+    s2k.deriveKey(passphrase, derived_key[0..key_size]) catch return error.DecryptionFailed;
+
+    // If there's an encrypted session key, decrypt it
+    if (skesk.encrypted_session_key) |esk| {
+        // The encrypted session key is XORed with the derived key
+        // (or encrypted with CFB depending on implementation)
+        // For OpenPGP, when esk is present, it's the session key encrypted
+        // with the derived key using CFB with zero IV.
+        // For simplicity, if no esk, use derived key directly.
+        _ = esk;
+        // TODO: implement encrypted session key decryption
+        return error.NotImplemented;
+    }
+
+    // No encrypted session key: use derived key directly
+    // Build SEIPD body with version byte
+    const seipd_body_len = 1 + encrypted_data.data.len;
+    const seipd_body = allocator.alloc(u8, seipd_body_len) catch
+        return error.OutOfMemory;
+    defer allocator.free(seipd_body);
+    seipd_body[0] = encrypted_data.version;
+    @memcpy(seipd_body[1..], encrypted_data.data);
+
+    return decryptSeipdAndExtract(allocator, encrypted_data, derived_key[0..key_size], sym_algo);
+}
+
+/// Decrypt SEIPD data and extract the plaintext from inner packets.
+fn decryptSeipdAndExtract(
+    allocator: Allocator,
+    encrypted_data: SymEncIntegrityPacket,
+    session_key: []const u8,
+    sym_algo: SymmetricAlgorithm,
+) DecomposeError![]u8 {
+    // Reconstruct the SEIPD packet body (version + data)
+    const seipd_body_len = 1 + encrypted_data.data.len;
+    const seipd_body = allocator.alloc(u8, seipd_body_len) catch
+        return error.OutOfMemory;
+    defer allocator.free(seipd_body);
+    seipd_body[0] = encrypted_data.version;
+    @memcpy(seipd_body[1..], encrypted_data.data);
+
+    // Decrypt
+    const inner_packets = seipd.seipdDecrypt(
+        allocator,
+        seipd_body,
+        session_key,
+        sym_algo,
+    ) catch return error.IntegrityCheckFailed;
+    defer allocator.free(inner_packets);
+
+    // Parse inner packets to find literal data
+    return extractLiteralData(allocator, inner_packets);
+}
+
+/// Parse inner packet stream and extract the literal data payload.
+///
+/// The inner packets may be:
+/// - A literal data packet directly
+/// - A compressed data packet wrapping a literal data packet
+fn extractLiteralData(allocator: Allocator, packet_data: []const u8) DecomposeError![]u8 {
+    var fbs = std.io.fixedBufferStream(packet_data);
+    const reader = fbs.reader();
+
+    while (true) {
+        const hdr = header_mod.readHeader(reader) catch |err| {
+            switch (err) {
+                error.EndOfStream => return error.MalformedMessage,
+                error.InvalidPacketTag => return error.InvalidPacketTag,
+            }
+        };
+
+        const body_len: usize = switch (hdr.body_length) {
+            .fixed => |len| len,
+            .indeterminate => {
+                // Read remaining
+                const pos = fbs.pos;
+                const body = packet_data[pos..];
+                fbs.pos = packet_data.len;
+
+                if (hdr.tag == .literal_data) {
+                    const pkt = LiteralDataPacket.parse(allocator, body) catch
+                        return error.InvalidPacket;
+                    defer pkt.deinit(allocator);
+                    const result = allocator.dupe(u8, pkt.data) catch
+                        return error.OutOfMemory;
+                    return result;
+                }
+                if (hdr.tag == .compressed_data) {
+                    const cpkt = CompressedDataPacket.parse(allocator, body) catch
+                        return error.InvalidPacket;
+                    defer cpkt.deinit(allocator);
+                    const decompressed = cpkt.decompress(allocator) catch
+                        return error.MalformedMessage;
+                    defer allocator.free(decompressed);
+                    return extractLiteralData(allocator, decompressed);
+                }
+                continue;
+            },
+            .partial => {
+                // Skip partial for now
+                return error.MalformedMessage;
+            },
+        };
+
+        const pos = fbs.pos;
+        if (pos + body_len > packet_data.len) return error.MalformedMessage;
+        const body = packet_data[pos .. pos + body_len];
+        fbs.pos = pos + body_len;
+
+        switch (hdr.tag) {
+            .literal_data => {
+                const pkt = LiteralDataPacket.parse(allocator, body) catch
+                    return error.InvalidPacket;
+                defer pkt.deinit(allocator);
+                const result = allocator.dupe(u8, pkt.data) catch
+                    return error.OutOfMemory;
+                return result;
+            },
+            .compressed_data => {
+                const cpkt = CompressedDataPacket.parse(allocator, body) catch
+                    return error.InvalidPacket;
+                defer cpkt.deinit(allocator);
+                const decompressed = cpkt.decompress(allocator) catch
+                    return error.MalformedMessage;
+                defer allocator.free(decompressed);
+                return extractLiteralData(allocator, decompressed);
+            },
+            else => {
+                // Skip other packet types (signatures, etc.)
+                continue;
+            },
+        }
+    }
+}
+
+/// Verify a signed message.
+///
+/// Parses the one-pass-sig + literal-data + signature structure,
+/// computes the document hash, and verifies the signature against
+/// the signer's public key.
+///
+/// Returns the literal data if verification succeeds.
+pub fn verifySignedMessage(
+    allocator: Allocator,
+    msg: *const ParsedMessage,
+    signer_key: *const Key,
+) DecomposeError![]u8 {
+    if (!msg.isSigned()) return error.MalformedMessage;
+
+    // Get the literal data
+    const literal = msg.literal_data orelse return error.MalformedMessage;
+
+    // Get the signature
+    if (msg.signatures.items.len == 0) return error.MalformedMessage;
+    const sig = &msg.signatures.items[0];
+
+    // Verify using the verification module
+    const result = sig_verification.verifyDocumentSignature(
+        sig,
+        literal.data,
+        &signer_key.primary_key,
+        allocator,
+    ) catch return error.DecryptionFailed;
+
+    if (!result) return error.IntegrityCheckFailed;
+
+    // Return a copy of the literal data
+    return allocator.dupe(u8, literal.data) catch return error.OutOfMemory;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,22 +753,38 @@ test "parseMessage empty data" {
     try std.testing.expect(msg.literal_data == null);
 }
 
-test "decryptWithKey returns NotImplemented" {
+test "decryptWithKey requires encrypted message" {
     const allocator = std.testing.allocator;
 
     var msg = ParsedMessage.init();
     defer msg.deinit(allocator);
 
-    const result = decryptWithKey(allocator, &msg, undefined, null);
-    try std.testing.expectError(error.NotImplemented, result);
+    // Not encrypted, should fail
+    const key_placeholder: Key = undefined;
+    const result = decryptWithKey(allocator, &msg, &key_placeholder, null);
+    try std.testing.expectError(error.MalformedMessage, result);
 }
 
-test "decryptWithPassphrase returns NotImplemented" {
+test "decryptWithPassphrase requires encrypted message" {
     const allocator = std.testing.allocator;
 
     var msg = ParsedMessage.init();
     defer msg.deinit(allocator);
 
     const result = decryptWithPassphrase(allocator, &msg, "password");
-    try std.testing.expectError(error.NotImplemented, result);
+    try std.testing.expectError(error.MalformedMessage, result);
+}
+
+test "extractLiteralData from literal packet" {
+    const allocator = std.testing.allocator;
+
+    // Build a literal data packet in binary
+    const compose = @import("compose.zig");
+    const literal_pkt = try compose.createLiteralData(allocator, "Hello", "test.txt", true);
+    defer allocator.free(literal_pkt);
+
+    const result = try extractLiteralData(allocator, literal_pkt);
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("Hello", result);
 }

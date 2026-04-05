@@ -35,6 +35,8 @@ pub const PublicKeyPacket = struct {
             .elgamal => 3,
             // ECC algorithms: handled specially (store remaining as 1 raw MPI)
             .ecdsa, .eddsa, .ecdh => null,
+            // RFC 9580 native key types use raw bytes, not MPIs
+            .x25519, .x448, .ed25519, .ed448 => null,
             _ => null,
         };
     }

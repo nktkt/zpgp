@@ -3,7 +3,7 @@
 
 const std = @import("std");
 
-/// RFC 4880 Section 9.1 - Public-Key Algorithms
+/// RFC 4880 Section 9.1 and RFC 9580 Section 9.1 - Public-Key Algorithms
 pub const PublicKeyAlgorithm = enum(u8) {
     rsa_encrypt_sign = 1,
     rsa_encrypt_only = 2,
@@ -12,7 +12,12 @@ pub const PublicKeyAlgorithm = enum(u8) {
     dsa = 17,
     ecdh = 18,
     ecdsa = 19,
-    eddsa = 22,
+    eddsa = 22, // Legacy EdDSA (RFC 4880bis); deprecated by RFC 9580
+    // RFC 9580 native key types:
+    x25519 = 25, // RFC 9580 native X25519 key agreement
+    x448 = 26, // RFC 9580 native X448 key agreement
+    ed25519 = 27, // RFC 9580 native Ed25519 signing
+    ed448 = 28, // RFC 9580 native Ed448 signing
     _,
 
     pub fn name(self: PublicKeyAlgorithm) []const u8 {
@@ -24,7 +29,11 @@ pub const PublicKeyAlgorithm = enum(u8) {
             .dsa => "DSA",
             .ecdh => "ECDH",
             .ecdsa => "ECDSA",
-            .eddsa => "EdDSA",
+            .eddsa => "EdDSA (Legacy)",
+            .x25519 => "X25519",
+            .x448 => "X448",
+            .ed25519 => "Ed25519",
+            .ed448 => "Ed448",
             _ => "Unknown",
         };
     }
@@ -33,6 +42,7 @@ pub const PublicKeyAlgorithm = enum(u8) {
     pub fn canSign(self: PublicKeyAlgorithm) bool {
         return switch (self) {
             .rsa_encrypt_sign, .rsa_sign_only, .dsa, .ecdsa, .eddsa => true,
+            .ed25519, .ed448 => true, // RFC 9580 native signing
             else => false,
         };
     }
@@ -41,7 +51,40 @@ pub const PublicKeyAlgorithm = enum(u8) {
     pub fn canEncrypt(self: PublicKeyAlgorithm) bool {
         return switch (self) {
             .rsa_encrypt_sign, .rsa_encrypt_only, .elgamal, .ecdh => true,
+            .x25519, .x448 => true, // RFC 9580 native key agreement
             else => false,
+        };
+    }
+
+    /// Whether this is a native RFC 9580 algorithm.
+    pub fn isNativeV6(self: PublicKeyAlgorithm) bool {
+        return switch (self) {
+            .x25519, .x448, .ed25519, .ed448 => true,
+            else => false,
+        };
+    }
+
+    /// Return the public key material size in bytes for native key types.
+    /// Returns null for non-native types (which use MPI encoding).
+    pub fn nativePublicKeySize(self: PublicKeyAlgorithm) ?usize {
+        return switch (self) {
+            .x25519 => 32,
+            .ed25519 => 32,
+            .x448 => 56,
+            .ed448 => 57,
+            else => null,
+        };
+    }
+
+    /// Return the secret key material size in bytes for native key types.
+    /// Returns null for non-native types (which use MPI encoding).
+    pub fn nativeSecretKeySize(self: PublicKeyAlgorithm) ?usize {
+        return switch (self) {
+            .x25519 => 32,
+            .ed25519 => 32,
+            .x448 => 56,
+            .ed448 => 57,
+            else => null,
         };
     }
 };
@@ -146,6 +189,43 @@ pub const HashAlgorithm = enum(u8) {
     }
 };
 
+/// RFC 9580 Section 9.6 - AEAD Algorithms
+pub const AeadAlgorithm = enum(u8) {
+    eax = 1,
+    ocb = 2,
+    gcm = 3,
+    _,
+
+    pub fn name(self: AeadAlgorithm) []const u8 {
+        return switch (self) {
+            .eax => "EAX",
+            .ocb => "OCB",
+            .gcm => "GCM",
+            _ => "Unknown",
+        };
+    }
+
+    /// Authentication tag size in bytes. All OpenPGP AEAD modes use 16.
+    pub fn tagSize(self: AeadAlgorithm) ?usize {
+        return switch (self) {
+            .eax => 16,
+            .ocb => 16,
+            .gcm => 16,
+            _ => null,
+        };
+    }
+
+    /// Nonce (IV) size in bytes.
+    pub fn nonceSize(self: AeadAlgorithm) ?usize {
+        return switch (self) {
+            .eax => 16,
+            .ocb => 15,
+            .gcm => 12,
+            _ => null,
+        };
+    }
+};
+
 /// RFC 4880 Section 9.3 - Compression Algorithms
 pub const CompressionAlgorithm = enum(u8) {
     uncompressed = 0,
@@ -239,6 +319,33 @@ test "HashAlgorithm names" {
     const unknown: HashAlgorithm = @enumFromInt(42);
     try std.testing.expectEqualStrings("Unknown", unknown.name());
     try std.testing.expect(unknown.digestSize() == null);
+}
+
+test "AeadAlgorithm names and properties" {
+    try std.testing.expectEqualStrings("EAX", AeadAlgorithm.eax.name());
+    try std.testing.expectEqualStrings("OCB", AeadAlgorithm.ocb.name());
+    try std.testing.expectEqualStrings("GCM", AeadAlgorithm.gcm.name());
+
+    try std.testing.expectEqual(@as(usize, 16), AeadAlgorithm.eax.tagSize().?);
+    try std.testing.expectEqual(@as(usize, 16), AeadAlgorithm.ocb.tagSize().?);
+    try std.testing.expectEqual(@as(usize, 16), AeadAlgorithm.gcm.tagSize().?);
+
+    try std.testing.expectEqual(@as(usize, 16), AeadAlgorithm.eax.nonceSize().?);
+    try std.testing.expectEqual(@as(usize, 15), AeadAlgorithm.ocb.nonceSize().?);
+    try std.testing.expectEqual(@as(usize, 12), AeadAlgorithm.gcm.nonceSize().?);
+}
+
+test "AeadAlgorithm unknown" {
+    const unknown: AeadAlgorithm = @enumFromInt(99);
+    try std.testing.expectEqualStrings("Unknown", unknown.name());
+    try std.testing.expect(unknown.tagSize() == null);
+    try std.testing.expect(unknown.nonceSize() == null);
+}
+
+test "AeadAlgorithm integer values" {
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(AeadAlgorithm.eax));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(AeadAlgorithm.ocb));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(AeadAlgorithm.gcm));
 }
 
 test "CompressionAlgorithm names" {

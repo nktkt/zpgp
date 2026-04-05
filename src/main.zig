@@ -4,6 +4,11 @@ const zpgp = @import("zpgp");
 const armor = zpgp.armor;
 const import_export = zpgp.import_export;
 const keyring_mod = zpgp.keyring;
+const compose = zpgp.compose;
+const decompose_mod = zpgp.decompose;
+const enums = zpgp.enums;
+const keygen_mod = zpgp.keygen;
+const PublicKeyAlgorithm = zpgp.PublicKeyAlgorithm;
 
 pub fn main() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
@@ -21,15 +26,15 @@ pub fn main() !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "keygen")) {
-        cmdKeygen(args[2..]);
+        cmdKeygen(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "sign")) {
-        cmdSign(args[2..]);
+        cmdSign(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "verify")) {
-        cmdVerify(args[2..]);
+        cmdVerify(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "encrypt")) {
-        cmdEncrypt(args[2..]);
+        cmdEncrypt(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "decrypt")) {
-        cmdDecrypt(args[2..]);
+        cmdDecrypt(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "key")) {
         if (args.len < 3) {
             printKeyUsage();
@@ -313,34 +318,499 @@ fn cmdDearmor(allocator: std.mem.Allocator, args: []const []const u8) !void {
 // Stub commands
 // ---------------------------------------------------------------------------
 
-fn cmdKeygen(args: []const []const u8) void {
-    _ = args;
+fn cmdKeygen(allocator: std.mem.Allocator, args: []const []const u8) void {
+    const stdout = std.fs.File.stdout();
     const stderr = std.fs.File.stderr();
-    stderr.writeAll("keygen: not yet implemented\n") catch {};
+    const ew = stderr.deprecatedWriter();
+
+    var name_str: ?[]const u8 = null;
+    var email_str: ?[]const u8 = null;
+    var algo_str: []const u8 = "rsa";
+    var bits: u32 = 2048;
+    var passphrase: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+    var secret_output_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--name") or std.mem.eql(u8, args[i], "-n")) {
+            i += 1;
+            if (i < args.len) name_str = args[i];
+        } else if (std.mem.eql(u8, args[i], "--email") or std.mem.eql(u8, args[i], "-e")) {
+            i += 1;
+            if (i < args.len) email_str = args[i];
+        } else if (std.mem.eql(u8, args[i], "--algo") or std.mem.eql(u8, args[i], "-a")) {
+            i += 1;
+            if (i < args.len) algo_str = args[i];
+        } else if (std.mem.eql(u8, args[i], "--bits") or std.mem.eql(u8, args[i], "-b")) {
+            i += 1;
+            if (i < args.len) {
+                bits = std.fmt.parseInt(u32, args[i], 10) catch {
+                    ew.print("Invalid bit count: {s}\n", .{args[i]}) catch {};
+                    return;
+                };
+            }
+        } else if (std.mem.eql(u8, args[i], "--passphrase") or std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i < args.len) passphrase = args[i];
+        } else if (std.mem.eql(u8, args[i], "--output") or std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i < args.len) output_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--secret-output")) {
+            i += 1;
+            if (i < args.len) secret_output_path = args[i];
+        }
+    }
+
+    if (name_str == null or email_str == null) {
+        stderr.writeAll(
+            \\Usage: zpgp keygen --name <name> --email <email> [options]
+            \\
+            \\Options:
+            \\  --name, -n <name>          User name (required)
+            \\  --email, -e <email>        Email address (required)
+            \\  --algo, -a <algorithm>     Algorithm: rsa (default), ed25519
+            \\  --bits, -b <bits>          Key size for RSA: 2048 (default), 3072, 4096
+            \\  --passphrase, -p <pass>    Passphrase for secret key encryption
+            \\  --output, -o <file>        Write public key to file (default: stdout)
+            \\  --secret-output <file>     Write secret key to file
+            \\
+        ) catch {};
+        return;
+    }
+
+    const user_id = std.fmt.allocPrint(allocator, "{s} <{s}>", .{ name_str.?, email_str.? }) catch {
+        ew.print("Out of memory\n", .{}) catch {};
+        return;
+    };
+    defer allocator.free(user_id);
+
+    var algorithm: PublicKeyAlgorithm = .rsa_encrypt_sign;
+    if (std.mem.eql(u8, algo_str, "rsa")) {
+        algorithm = .rsa_encrypt_sign;
+    } else if (std.mem.eql(u8, algo_str, "ed25519") or std.mem.eql(u8, algo_str, "eddsa")) {
+        algorithm = .eddsa;
+    } else {
+        ew.print("Unknown algorithm: {s}. Use 'rsa' or 'ed25519'.\n", .{algo_str}) catch {};
+        return;
+    }
+
+    ew.print("Generating {s} key", .{if (algorithm == .eddsa) "Ed25519" else "RSA"}) catch {};
+    if (algorithm != .eddsa) {
+        ew.print(" ({d} bits)", .{bits}) catch {};
+    }
+    ew.print(" for {s}...\n", .{user_id}) catch {};
+
+    const result = keygen_mod.generateKey(allocator, .{
+        .algorithm = algorithm,
+        .bits = bits,
+        .user_id = user_id,
+        .passphrase = passphrase,
+        .hash_algo = .sha256,
+    }) catch |err| {
+        ew.print("Error generating key: {}\n", .{err}) catch {};
+        return;
+    };
+    defer result.deinit(allocator);
+
+    ew.print("Key generated successfully.\n", .{}) catch {};
+    ew.print("Fingerprint: ", .{}) catch {};
+    for (result.fingerprint) |byte| {
+        ew.print("{X:0>2}", .{byte}) catch {};
+    }
+    ew.print("\nKey ID: ", .{}) catch {};
+    for (result.key_id) |byte| {
+        ew.print("{X:0>2}", .{byte}) catch {};
+    }
+    ew.print("\n", .{}) catch {};
+
+    writeOutputFile(output_path, result.public_key_armored) catch |err| {
+        ew.print("Error writing public key: {}\n", .{err}) catch {};
+        return;
+    };
+
+    if (secret_output_path) |sp| {
+        writeOutputFile(sp, result.secret_key_armored) catch |err| {
+            ew.print("Error writing secret key: {}\n", .{err}) catch {};
+            return;
+        };
+        ew.print("Secret key written to: {s}\n", .{sp}) catch {};
+    } else {
+        if (output_path != null) {
+            ew.print("Secret key not saved. Use --secret-output to save it.\n", .{}) catch {};
+        } else {
+            stdout.writeAll("\n") catch {};
+            stderr.writeAll("--- Secret key follows ---\n") catch {};
+            stdout.writeAll(result.secret_key_armored) catch {};
+        }
+    }
 }
 
-fn cmdSign(args: []const []const u8) void {
-    _ = args;
+fn cmdSign(allocator: std.mem.Allocator, args: []const []const u8) void {
     const stderr = std.fs.File.stderr();
-    stderr.writeAll("sign: not yet implemented\n") catch {};
+    const ew = stderr.deprecatedWriter();
+
+    // Parse flags
+    var key_path: ?[]const u8 = null;
+    var passphrase: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+    var do_armor = false;
+    var input_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--key") or std.mem.eql(u8, args[i], "-k")) {
+            i += 1;
+            if (i < args.len) key_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--passphrase") or std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i < args.len) passphrase = args[i];
+        } else if (std.mem.eql(u8, args[i], "--output") or std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i < args.len) output_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--armor") or std.mem.eql(u8, args[i], "-a")) {
+            do_armor = true;
+        } else {
+            input_path = args[i];
+        }
+    }
+
+    if (key_path == null or input_path == null) {
+        stderr.writeAll("Usage: zpgp sign --key <secret-key-file> [--passphrase <pass>] [--armor] [--output <file>] <input-file>\n") catch {};
+        return;
+    }
+
+    // Read secret key
+    const key_data = readInputFile(allocator, key_path.?) catch |err| {
+        ew.print("Error reading key file: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(key_data);
+
+    // Import the secret key
+    var key = import_export.importPublicKeyAuto(allocator, key_data) catch |err| {
+        ew.print("Error importing key: {}\n", .{err}) catch {};
+        return;
+    };
+    defer key.deinit(allocator);
+
+    // Read input file
+    const input_data = readInputFile(allocator, input_path.?) catch |err| {
+        ew.print("Error reading input: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(input_data);
+
+    // Create signed message
+    const signed = compose.createSignedMessage(
+        allocator,
+        input_data,
+        input_path.?,
+        &key,
+        passphrase,
+        .sha256,
+    ) catch |err| {
+        ew.print("Error signing: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(signed);
+
+    // Optionally armor
+    var output_data: []u8 = signed;
+    var output_owned = false;
+    if (do_armor) {
+        const headers = [_]armor.Header{
+            .{ .name = "Version", .value = "zpgp 0.1" },
+        };
+        output_data = armor.encode(allocator, signed, .message, &headers) catch |err| {
+            ew.print("Error armoring: {}\n", .{err}) catch {};
+            return;
+        };
+        output_owned = true;
+    }
+    defer if (output_owned) allocator.free(output_data);
+
+    // Write output
+    writeOutputFile(output_path, output_data) catch |err| {
+        ew.print("Error writing output: {}\n", .{err}) catch {};
+        return;
+    };
+
+    stderr.writeAll("Signature created successfully.\n") catch {};
 }
 
-fn cmdVerify(args: []const []const u8) void {
-    _ = args;
+fn cmdVerify(allocator: std.mem.Allocator, args: []const []const u8) void {
     const stderr = std.fs.File.stderr();
-    stderr.writeAll("verify: not yet implemented\n") catch {};
+    const ew = stderr.deprecatedWriter();
+
+    var key_path: ?[]const u8 = null;
+    var input_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--key") or std.mem.eql(u8, args[i], "-k")) {
+            i += 1;
+            if (i < args.len) key_path = args[i];
+        } else {
+            input_path = args[i];
+        }
+    }
+
+    if (key_path == null or input_path == null) {
+        stderr.writeAll("Usage: zpgp verify --key <pubkey-file> <signed-file>\n") catch {};
+        return;
+    }
+
+    // Read public key
+    const key_data = readInputFile(allocator, key_path.?) catch |err| {
+        ew.print("Error reading key file: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(key_data);
+
+    var key = import_export.importPublicKeyAuto(allocator, key_data) catch |err| {
+        ew.print("Error importing key: {}\n", .{err}) catch {};
+        return;
+    };
+    defer key.deinit(allocator);
+
+    // Read signed message
+    const input_data = readInputFile(allocator, input_path.?) catch |err| {
+        ew.print("Error reading input: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(input_data);
+
+    // Parse the message
+    var msg = decompose_mod.parseMessage(allocator, input_data) catch |err| {
+        ew.print("Error parsing message: {}\n", .{err}) catch {};
+        return;
+    };
+    defer msg.deinit(allocator);
+
+    // Verify
+    const plaintext = decompose_mod.verifySignedMessage(allocator, &msg, &key) catch |err| {
+        ew.print("Signature verification FAILED: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(plaintext);
+
+    stderr.writeAll("Signature verified successfully.\n") catch {};
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(plaintext) catch {};
 }
 
-fn cmdEncrypt(args: []const []const u8) void {
-    _ = args;
+fn cmdEncrypt(allocator: std.mem.Allocator, args: []const []const u8) void {
     const stderr = std.fs.File.stderr();
-    stderr.writeAll("encrypt: not yet implemented\n") catch {};
+    const ew = stderr.deprecatedWriter();
+
+    var recipient_path: ?[]const u8 = null;
+    var passphrase: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+    var do_armor = false;
+    var input_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--recipient") or std.mem.eql(u8, args[i], "-r")) {
+            i += 1;
+            if (i < args.len) recipient_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--passphrase") or std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i < args.len) passphrase = args[i];
+        } else if (std.mem.eql(u8, args[i], "--output") or std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i < args.len) output_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--armor") or std.mem.eql(u8, args[i], "-a")) {
+            do_armor = true;
+        } else {
+            input_path = args[i];
+        }
+    }
+
+    if (input_path == null) {
+        stderr.writeAll("Usage: zpgp encrypt [--recipient <pubkey-file>] [--passphrase <pass>] [--armor] [--output <file>] <input-file>\n") catch {};
+        return;
+    }
+
+    // Read input
+    const input_data = readInputFile(allocator, input_path.?) catch |err| {
+        ew.print("Error reading input: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(input_data);
+
+    var encrypted: []u8 = undefined;
+
+    if (passphrase) |pass| {
+        // Symmetric encryption with passphrase
+        encrypted = compose.encryptMessageSymmetric(
+            allocator,
+            input_data,
+            input_path.?,
+            pass,
+            .aes256,
+            null,
+        ) catch |err| {
+            ew.print("Error encrypting: {}\n", .{err}) catch {};
+            return;
+        };
+    } else if (recipient_path) |rpath| {
+        // Public key encryption
+        const key_data = readInputFile(allocator, rpath) catch |err| {
+            ew.print("Error reading recipient key: {}\n", .{err}) catch {};
+            return;
+        };
+        defer allocator.free(key_data);
+
+        var key = import_export.importPublicKeyAuto(allocator, key_data) catch |err| {
+            ew.print("Error importing key: {}\n", .{err}) catch {};
+            return;
+        };
+        defer key.deinit(allocator);
+
+        const recipients = [_]*const @import("zpgp").key_mod.Key{&key};
+        encrypted = compose.encryptMessage(
+            allocator,
+            input_data,
+            input_path.?,
+            &recipients,
+            .aes256,
+            null,
+        ) catch |err| {
+            ew.print("Error encrypting: {}\n", .{err}) catch {};
+            return;
+        };
+    } else {
+        stderr.writeAll("Error: must specify either --recipient or --passphrase\n") catch {};
+        return;
+    }
+    defer allocator.free(encrypted);
+
+    // Optionally armor
+    var output_data: []u8 = encrypted;
+    var output_owned = false;
+    if (do_armor) {
+        const headers = [_]armor.Header{
+            .{ .name = "Version", .value = "zpgp 0.1" },
+        };
+        output_data = armor.encode(allocator, encrypted, .message, &headers) catch |err| {
+            ew.print("Error armoring: {}\n", .{err}) catch {};
+            return;
+        };
+        output_owned = true;
+    }
+    defer if (output_owned) allocator.free(output_data);
+
+    writeOutputFile(output_path, output_data) catch |err| {
+        ew.print("Error writing output: {}\n", .{err}) catch {};
+        return;
+    };
+
+    stderr.writeAll("Encryption successful.\n") catch {};
 }
 
-fn cmdDecrypt(args: []const []const u8) void {
-    _ = args;
+fn cmdDecrypt(allocator: std.mem.Allocator, args: []const []const u8) void {
     const stderr = std.fs.File.stderr();
-    stderr.writeAll("decrypt: not yet implemented\n") catch {};
+    const ew = stderr.deprecatedWriter();
+
+    var key_path: ?[]const u8 = null;
+    var passphrase: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+    var input_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--key") or std.mem.eql(u8, args[i], "-k")) {
+            i += 1;
+            if (i < args.len) key_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--passphrase") or std.mem.eql(u8, args[i], "-p")) {
+            i += 1;
+            if (i < args.len) passphrase = args[i];
+        } else if (std.mem.eql(u8, args[i], "--output") or std.mem.eql(u8, args[i], "-o")) {
+            i += 1;
+            if (i < args.len) output_path = args[i];
+        } else {
+            input_path = args[i];
+        }
+    }
+
+    if (input_path == null) {
+        stderr.writeAll("Usage: zpgp decrypt [--key <secret-key-file>] [--passphrase <pass>] [--output <file>] <input-file>\n") catch {};
+        return;
+    }
+
+    // Read input
+    const input_data = readInputFile(allocator, input_path.?) catch |err| {
+        ew.print("Error reading input: {}\n", .{err}) catch {};
+        return;
+    };
+    defer allocator.free(input_data);
+
+    // Parse the message
+    var msg = decompose_mod.parseMessage(allocator, input_data) catch |err| {
+        ew.print("Error parsing message: {}\n", .{err}) catch {};
+        return;
+    };
+    defer msg.deinit(allocator);
+
+    if (!msg.isEncrypted()) {
+        stderr.writeAll("Error: message is not encrypted\n") catch {};
+        return;
+    }
+
+    var plaintext: []u8 = undefined;
+
+    if (passphrase) |pass| {
+        // Passphrase decryption
+        plaintext = decompose_mod.decryptWithPassphrase(allocator, &msg, pass) catch |err| {
+            ew.print("Error decrypting: {}\n", .{err}) catch {};
+            return;
+        };
+    } else if (key_path) |kpath| {
+        // Secret key decryption
+        const key_data = readInputFile(allocator, kpath) catch |err| {
+            ew.print("Error reading key file: {}\n", .{err}) catch {};
+            return;
+        };
+        defer allocator.free(key_data);
+
+        var key = import_export.importPublicKeyAuto(allocator, key_data) catch |err| {
+            ew.print("Error importing key: {}\n", .{err}) catch {};
+            return;
+        };
+        defer key.deinit(allocator);
+
+        plaintext = decompose_mod.decryptWithKey(allocator, &msg, &key, null) catch |err| {
+            ew.print("Error decrypting: {}\n", .{err}) catch {};
+            return;
+        };
+    } else {
+        stderr.writeAll("Error: must specify either --key or --passphrase\n") catch {};
+        return;
+    }
+    defer allocator.free(plaintext);
+
+    // Write output
+    writeOutputFile(output_path, plaintext) catch |err| {
+        ew.print("Error writing output: {}\n", .{err}) catch {};
+        return;
+    };
+
+    stderr.writeAll("Decryption successful.\n") catch {};
+}
+
+/// Write output data to a file or stdout.
+fn writeOutputFile(path: ?[]const u8, data: []const u8) !void {
+    if (path) |p| {
+        if (std.mem.eql(u8, p, "-")) {
+            try std.fs.File.stdout().writeAll(data);
+        } else {
+            try std.fs.cwd().writeFile(.{ .sub_path = p, .data = data });
+        }
+    } else {
+        try std.fs.File.stdout().writeAll(data);
+    }
 }
 
 // ---------------------------------------------------------------------------

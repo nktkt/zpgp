@@ -55,6 +55,8 @@ pub const SecretKeyPacket = struct {
             .dsa => 4,
             .elgamal => 3,
             .ecdsa, .eddsa, .ecdh => null,
+            // RFC 9580 native key types use raw bytes, not MPIs
+            .x25519, .x448, .ed25519, .ed448 => null,
             _ => null,
         };
 
