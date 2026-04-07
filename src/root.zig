@@ -73,6 +73,11 @@ pub const aead_gcm = @import("crypto/aead/gcm.zig");
 pub const pkesk_v6 = @import("crypto/pkesk_v6.zig");
 pub const skesk_v6 = @import("crypto/skesk_v6.zig");
 pub const symmetric_dispatch = @import("crypto/symmetric_dispatch.zig");
+pub const idea_mod = @import("crypto/idea.zig");
+pub const blowfish_mod = @import("crypto/blowfish.zig");
+pub const camellia_mod = @import("crypto/camellia.zig");
+pub const key_stretching = @import("crypto/key_stretching.zig");
+pub const cipher_registry = @import("crypto/cipher_registry.zig");
 
 // Signature modules
 pub const subpackets = @import("signature/subpackets.zig");
@@ -139,6 +144,29 @@ pub const utils = @import("utils/mod.zig");
 pub const algorithm_policy = @import("policy/algorithm_policy.zig");
 pub const compliance = @import("policy/compliance.zig");
 
+// Configuration modules
+pub const preferences = @import("config/preferences.zig");
+pub const gpg_config = @import("config/gpg_config.zig");
+
+// Diagnostics modules
+pub const error_report = @import("diag/error_report.zig");
+pub const operation_log = @import("diag/operation_log.zig");
+
+// Benchmark framework
+pub const benchmark = @import("benchmark/bench.zig");
+
+// Key migration utilities
+pub const key_migrate = @import("migrate/key_migrate.zig");
+
+// Compatibility layers
+pub const gnupg_compat = @import("compat/gnupg.zig");
+pub const sequoia_compat = @import("compat/sequoia.zig");
+
+// Validation modules
+pub const key_validator = @import("validation/key_validator.zig");
+pub const message_validator = @import("validation/message_validator.zig");
+pub const armor_validator = @import("validation/armor_validator.zig");
+
 // Example modules
 pub const example_encrypt_decrypt = @import("examples/encrypt_decrypt.zig");
 pub const example_key_management = @import("examples/key_management.zig");
@@ -165,6 +193,14 @@ pub const test_policy = @import("test_policy.zig");
 pub const test_examples = @import("test_examples.zig");
 pub const test_inspect = @import("test_inspect.zig");
 pub const test_protocol = @import("test_protocol.zig");
+pub const test_ciphers_extended = @import("test_ciphers_extended.zig");
+pub const test_config = @import("test_config.zig");
+pub const test_diag = @import("test_diag.zig");
+pub const test_benchmark = @import("test_benchmark.zig");
+pub const test_migrate = @import("test_migrate.zig");
+pub const test_compat = @import("test_compat.zig");
+pub const test_validation = @import("test_validation.zig");
+pub const test_sop_extended = @import("test_sop_extended.zig");
 
 // Re-exports for convenience.
 pub const PublicKeyAlgorithm = enums.PublicKeyAlgorithm;

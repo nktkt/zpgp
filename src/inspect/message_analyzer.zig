@@ -380,6 +380,9 @@ fn assessSymAlgo(algo: SymmetricAlgorithm) []const u8 {
         .idea => "IDEA: Weak - 64-bit block, legacy algorithm",
         .blowfish => "Blowfish: Weak - 64-bit block",
         .plaintext => "Plaintext: NONE - no encryption at all!",
+        .camellia128 => "Camellia-128: Good - 128-bit block, 128-bit key",
+        .camellia192 => "Camellia-192: Good - 128-bit block, 192-bit key",
+        .camellia256 => "Camellia-256: Excellent - 128-bit block, 256-bit key",
         _ => "Unknown algorithm",
     };
 }

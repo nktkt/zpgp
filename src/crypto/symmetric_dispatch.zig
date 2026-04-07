@@ -23,6 +23,11 @@ const SymmetricAlgorithm = @import("../types/enums.zig").SymmetricAlgorithm;
 const Cast5 = @import("cast5.zig").Cast5;
 const Twofish = @import("twofish.zig").Twofish;
 const TripleDes = @import("triple_des.zig").TripleDes;
+const Idea = @import("idea.zig").Idea;
+const Blowfish = @import("blowfish.zig").Blowfish;
+const Camellia128 = @import("camellia.zig").Camellia128;
+const Camellia192 = @import("camellia.zig").Camellia192;
+const Camellia256 = @import("camellia.zig").Camellia256;
 const cfb_mod = @import("cfb.zig");
 
 /// Security level classification for symmetric algorithms.
@@ -102,6 +107,24 @@ pub fn getCipherInfo(algo: SymmetricAlgorithm) ?CipherInfo {
             .name = "Blowfish",
             .security_level = .deprecated,
         },
+        .camellia128 => .{
+            .key_size = 16,
+            .block_size = 16,
+            .name = "Camellia-128",
+            .security_level = .secure,
+        },
+        .camellia192 => .{
+            .key_size = 24,
+            .block_size = 16,
+            .name = "Camellia-192",
+            .security_level = .secure,
+        },
+        .camellia256 => .{
+            .key_size = 32,
+            .block_size = 16,
+            .name = "Camellia-256",
+            .security_level = .secure,
+        },
         .plaintext => null,
         _ => null,
     };
@@ -138,6 +161,31 @@ pub fn encryptBlock(algo: SymmetricAlgorithm, key: []const u8, dst: []u8, src: [
             const ctx = TripleDes.initEnc(key[0..24].*);
             ctx.encrypt(dst[0..8], src[0..8]);
         },
+        .idea => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Idea.initEnc(key[0..16].*);
+            ctx.encrypt(dst[0..8], src[0..8]);
+        },
+        .blowfish => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Blowfish.initEnc(key[0..16].*);
+            ctx.encrypt(dst[0..8], src[0..8]);
+        },
+        .camellia128 => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Camellia128.initEnc(key[0..16].*);
+            ctx.encrypt(dst[0..16], src[0..16]);
+        },
+        .camellia192 => {
+            if (key.len != 24) return error.InvalidKeyLength;
+            const ctx = Camellia192.initEnc(key[0..24].*);
+            ctx.encrypt(dst[0..16], src[0..16]);
+        },
+        .camellia256 => {
+            if (key.len != 32) return error.InvalidKeyLength;
+            const ctx = Camellia256.initEnc(key[0..32].*);
+            ctx.encrypt(dst[0..16], src[0..16]);
+        },
         else => return error.UnsupportedAlgorithm,
     }
 }
@@ -173,6 +221,31 @@ pub fn decryptBlock(algo: SymmetricAlgorithm, key: []const u8, dst: []u8, src: [
             const ctx = TripleDes.initEnc(key[0..24].*);
             ctx.decrypt(dst[0..8], src[0..8]);
         },
+        .idea => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Idea.initEnc(key[0..16].*);
+            ctx.decrypt(dst[0..8], src[0..8]);
+        },
+        .blowfish => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Blowfish.initEnc(key[0..16].*);
+            ctx.decrypt(dst[0..8], src[0..8]);
+        },
+        .camellia128 => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            const ctx = Camellia128.initEnc(key[0..16].*);
+            ctx.decrypt(dst[0..16], src[0..16]);
+        },
+        .camellia192 => {
+            if (key.len != 24) return error.InvalidKeyLength;
+            const ctx = Camellia192.initEnc(key[0..24].*);
+            ctx.decrypt(dst[0..16], src[0..16]);
+        },
+        .camellia256 => {
+            if (key.len != 32) return error.InvalidKeyLength;
+            const ctx = Camellia256.initEnc(key[0..32].*);
+            ctx.decrypt(dst[0..16], src[0..16]);
+        },
         else => return error.UnsupportedAlgorithm,
     }
 }
@@ -202,6 +275,26 @@ pub fn createCfbEncryptor(algo: SymmetricAlgorithm, key: []const u8) !CfbEncrypt
             if (key.len != 24) return error.InvalidKeyLength;
             return CfbEncryptor{ .state = .{ .triple_des = cfb_mod.TripleDesCfb.init(key[0..24].*) } };
         },
+        .idea => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            return CfbEncryptor{ .state = .{ .idea = cfb_mod.IdeaCfb.init(key[0..16].*) } };
+        },
+        .blowfish => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            return CfbEncryptor{ .state = .{ .blowfish = cfb_mod.BlowfishCfb.init(key[0..16].*) } };
+        },
+        .camellia128 => {
+            if (key.len != 16) return error.InvalidKeyLength;
+            return CfbEncryptor{ .state = .{ .camellia128 = cfb_mod.Camellia128Cfb.init(key[0..16].*) } };
+        },
+        .camellia192 => {
+            if (key.len != 24) return error.InvalidKeyLength;
+            return CfbEncryptor{ .state = .{ .camellia192 = cfb_mod.Camellia192Cfb.init(key[0..24].*) } };
+        },
+        .camellia256 => {
+            if (key.len != 32) return error.InvalidKeyLength;
+            return CfbEncryptor{ .state = .{ .camellia256 = cfb_mod.Camellia256Cfb.init(key[0..32].*) } };
+        },
         else => error.UnsupportedAlgorithm,
     };
 }
@@ -213,6 +306,11 @@ const Aes256Cfb = cfb_mod.Aes256Cfb;
 const Cast5Cfb = cfb_mod.Cast5Cfb;
 const TwofishCfb = cfb_mod.TwofishCfb;
 const TripleDesCfb = cfb_mod.TripleDesCfb;
+const IdeaCfb = cfb_mod.IdeaCfb;
+const BlowfishCfb = cfb_mod.BlowfishCfb;
+const Camellia128Cfb = cfb_mod.Camellia128Cfb;
+const Camellia192Cfb = cfb_mod.Camellia192Cfb;
+const Camellia256Cfb = cfb_mod.Camellia256Cfb;
 
 /// Unified CFB encryptor/decryptor that dispatches to the correct implementation.
 pub const CfbEncryptor = struct {
@@ -222,6 +320,11 @@ pub const CfbEncryptor = struct {
         cast5: Cast5Cfb,
         twofish: TwofishCfb,
         triple_des: TripleDesCfb,
+        idea: IdeaCfb,
+        blowfish: BlowfishCfb,
+        camellia128: Camellia128Cfb,
+        camellia192: Camellia192Cfb,
+        camellia256: Camellia256Cfb,
     },
 
     /// Encrypt data in-place using non-resyncing CFB.
@@ -233,6 +336,11 @@ pub const CfbEncryptor = struct {
             .cast5 => |*s| s.encryptData(data),
             .twofish => |*s| s.encryptData(data),
             .triple_des => |*s| s.encryptData(data),
+            .idea => |*s| s.encryptData(data),
+            .blowfish => |*s| s.encryptData(data),
+            .camellia128 => |*s| s.encryptData(data),
+            .camellia192 => |*s| s.encryptData(data),
+            .camellia256 => |*s| s.encryptData(data),
         }
     }
 
@@ -244,6 +352,11 @@ pub const CfbEncryptor = struct {
             .cast5 => |*s| s.decrypt(data),
             .twofish => |*s| s.decrypt(data),
             .triple_des => |*s| s.decrypt(data),
+            .idea => |*s| s.decrypt(data),
+            .blowfish => |*s| s.decrypt(data),
+            .camellia128 => |*s| s.decrypt(data),
+            .camellia192 => |*s| s.decrypt(data),
+            .camellia256 => |*s| s.decrypt(data),
         }
     }
 
@@ -255,6 +368,11 @@ pub const CfbEncryptor = struct {
             .cast5 => Cast5Cfb.block_size,
             .twofish => TwofishCfb.block_size,
             .triple_des => TripleDesCfb.block_size,
+            .idea => IdeaCfb.block_size,
+            .blowfish => BlowfishCfb.block_size,
+            .camellia128 => Camellia128Cfb.block_size,
+            .camellia192 => Camellia192Cfb.block_size,
+            .camellia256 => Camellia256Cfb.block_size,
         };
     }
 };

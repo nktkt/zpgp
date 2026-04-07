@@ -104,6 +104,9 @@ pub fn assessSymmetricAlgorithm(algo: SymmetricAlgorithm) SecurityLevel {
         .aes192 => .secure,
         .aes256 => .secure,
         .twofish => .secure,
+        .camellia128 => .secure,
+        .camellia192 => .secure,
+        .camellia256 => .secure,
         _ => .unknown,
     };
 }

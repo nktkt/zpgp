@@ -498,6 +498,9 @@ fn checkSymmetricPreference(allocator: Allocator, analysis: *KeyAnalysis, algo: 
         .twofish => {
             // Good - 128-bit block
         },
+        .camellia128, .camellia192, .camellia256 => {
+            // Good - 128-bit block, modern cipher
+        },
         _ => {},
     }
 }

@@ -71,12 +71,14 @@ pub const AlgorithmPolicy = struct {
                 .idea, .triple_des, .cast5, .blowfish => true,
                 .aes128, .aes192, .aes256 => true,
                 .twofish => true,
+                .camellia128, .camellia192, .camellia256 => true,
                 .plaintext => false,
                 _ => false,
             },
             .rfc9580 => switch (algo) {
                 .aes128, .aes192, .aes256 => true,
                 .twofish => true,
+                .camellia128, .camellia192, .camellia256 => true,
                 // Legacy allowed with warnings
                 .triple_des, .cast5, .blowfish, .idea => true,
                 .plaintext => false,

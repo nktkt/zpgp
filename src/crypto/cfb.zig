@@ -155,10 +155,20 @@ pub const Aes256Cfb = OpenPgpCfb(aes.Aes256);
 const Cast5 = @import("cast5.zig").Cast5;
 const Twofish = @import("twofish.zig").Twofish;
 const TripleDes = @import("triple_des.zig").TripleDes;
+const Idea = @import("idea.zig").Idea;
+const Blowfish = @import("blowfish.zig").Blowfish;
+const Camellia128 = @import("camellia.zig").Camellia128;
+const Camellia192 = @import("camellia.zig").Camellia192;
+const Camellia256 = @import("camellia.zig").Camellia256;
 
 pub const Cast5Cfb = OpenPgpCfbDirect(Cast5);
 pub const TwofishCfb = OpenPgpCfbDirect(Twofish);
 pub const TripleDesCfb = OpenPgpCfbDirect(TripleDes);
+pub const IdeaCfb = OpenPgpCfbDirect(Idea);
+pub const BlowfishCfb = OpenPgpCfbDirect(Blowfish);
+pub const Camellia128Cfb = OpenPgpCfbDirect(Camellia128);
+pub const Camellia192Cfb = OpenPgpCfbDirect(Camellia192);
+pub const Camellia256Cfb = OpenPgpCfbDirect(Camellia256);
 
 /// Generic OpenPGP CFB mode for ciphers that are their own encrypt context
 /// (i.e. `initEnc` returns the cipher itself, which has an `encrypt` method).

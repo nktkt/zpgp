@@ -100,6 +100,9 @@ pub const SymmetricAlgorithm = enum(u8) {
     aes192 = 8,
     aes256 = 9,
     twofish = 10,
+    camellia128 = 11,
+    camellia192 = 12,
+    camellia256 = 13,
     _,
 
     pub fn name(self: SymmetricAlgorithm) []const u8 {
@@ -113,6 +116,9 @@ pub const SymmetricAlgorithm = enum(u8) {
             .aes192 => "AES-192",
             .aes256 => "AES-256",
             .twofish => "Twofish",
+            .camellia128 => "Camellia-128",
+            .camellia192 => "Camellia-192",
+            .camellia256 => "Camellia-256",
             _ => "Unknown",
         };
     }
@@ -129,6 +135,9 @@ pub const SymmetricAlgorithm = enum(u8) {
             .aes192 => 24,
             .aes256 => 32,
             .twofish => 32,
+            .camellia128 => 16,
+            .camellia192 => 24,
+            .camellia256 => 32,
             _ => null,
         };
     }
@@ -145,6 +154,9 @@ pub const SymmetricAlgorithm = enum(u8) {
             .aes192 => 16,
             .aes256 => 16,
             .twofish => 16,
+            .camellia128 => 16,
+            .camellia192 => 16,
+            .camellia256 => 16,
             _ => null,
         };
     }
