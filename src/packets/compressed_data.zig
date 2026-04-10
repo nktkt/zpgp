@@ -5,6 +5,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const CompressionAlgorithm = @import("../types/enums.zig").CompressionAlgorithm;
+const bzip2 = @import("../crypto/bzip2.zig");
 
 /// RFC 4880 Section 5.6 — Compressed Data Packet.
 ///
@@ -41,7 +42,9 @@ pub const CompressedDataPacket = struct {
             .uncompressed => try allocator.dupe(u8, self.compressed_data),
             .zip => decompressDeflate(allocator, self.compressed_data, .raw),
             .zlib => decompressDeflate(allocator, self.compressed_data, .zlib),
-            else => error.UnsupportedAlgorithm,
+            .bzip2 => bzip2.decompress(allocator, self.compressed_data) catch
+                return error.DecompressionFailed,
+            _ => error.UnsupportedAlgorithm,
         };
     }
 

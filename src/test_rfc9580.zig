@@ -250,17 +250,19 @@ test "rfc9580: Ed25519 native 32-byte seed secret" {
 // X448 and Ed448 Stub Tests
 // =========================================================================
 
-test "rfc9580: X448 stub returns UnsupportedAlgorithm" {
-    try testing.expectError(error.UnsupportedAlgorithm, X448Native.generate());
+test "rfc9580: X448 key generation works" {
+    const kp = X448Native.generate();
     try testing.expectEqual(@as(usize, 56), X448Native.public_key_size);
     try testing.expectEqual(@as(usize, 56), X448Native.secret_key_size);
+    try testing.expect(!std.mem.eql(u8, &kp.public, &([_]u8{0} ** 56)));
 }
 
-test "rfc9580: Ed448 stub returns UnsupportedAlgorithm" {
+test "rfc9580: Ed448 returns UnsupportedAlgorithm" {
+    // Ed448 is not yet implemented (awaiting proper curve arithmetic)
     try testing.expectError(error.UnsupportedAlgorithm, Ed448Native.generate());
-    try testing.expectEqual(@as(usize, 57), Ed448Native.public_key_size);
-    try testing.expectEqual(@as(usize, 57), Ed448Native.secret_key_size);
-    try testing.expectEqual(@as(usize, 114), Ed448Native.signature_size);
+    try testing.expectEqual(@as(usize, 57), Ed448Native.public_key_len);
+    try testing.expectEqual(@as(usize, 57), Ed448Native.secret_key_len);
+    try testing.expectEqual(@as(usize, 114), Ed448Native.signature_len);
 }
 
 // =========================================================================

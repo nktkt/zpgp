@@ -861,8 +861,8 @@ pub const TlvEntry = struct {
 /// Returns a dynamically allocated slice of TlvEntry. The entries
 /// reference the original data buffer and must not outlive it.
 pub fn parseTlv(allocator: Allocator, data: []const u8) ![]TlvEntry {
-    var entries = std.ArrayList(TlvEntry).init(allocator);
-    errdefer entries.deinit();
+    var entries: std.ArrayList(TlvEntry) = .empty;
+    errdefer entries.deinit(allocator);
 
     var offset: usize = 0;
     while (offset < data.len) {
@@ -900,7 +900,7 @@ pub fn parseTlv(allocator: Allocator, data: []const u8) ![]TlvEntry {
 
         if (offset + length > data.len) break;
 
-        try entries.append(.{
+        try entries.append(allocator, .{
             .tag = tag,
             .value = data[offset .. offset + length],
         });
@@ -908,7 +908,7 @@ pub fn parseTlv(allocator: Allocator, data: []const u8) ![]TlvEntry {
         offset += length;
     }
 
-    return entries.toOwnedSlice();
+    return entries.toOwnedSlice(allocator);
 }
 
 /// Find a TLV entry with the given tag.

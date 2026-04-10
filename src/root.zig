@@ -78,6 +78,11 @@ pub const blowfish_mod = @import("crypto/blowfish.zig");
 pub const camellia_mod = @import("crypto/camellia.zig");
 pub const key_stretching = @import("crypto/key_stretching.zig");
 pub const cipher_registry = @import("crypto/cipher_registry.zig");
+pub const bzip2_mod = @import("crypto/bzip2.zig");
+pub const pkcs11_mod = @import("crypto/pkcs11.zig");
+
+// Smart card bridge
+pub const pcsc_bridge = @import("card/pcsc_bridge.zig");
 
 // Signature modules
 pub const subpackets = @import("signature/subpackets.zig");
@@ -201,6 +206,11 @@ pub const test_migrate = @import("test_migrate.zig");
 pub const test_compat = @import("test_compat.zig");
 pub const test_validation = @import("test_validation.zig");
 pub const test_sop_extended = @import("test_sop_extended.zig");
+pub const test_curve448 = @import("test_curve448.zig");
+pub const test_gnupg_interop = @import("test_gnupg_interop.zig");
+pub const test_security_hardening = @import("test_security_hardening.zig");
+pub const test_perf_regression = @import("test_perf_regression.zig");
+pub const test_hardware = @import("test_hardware.zig");
 
 // Re-exports for convenience.
 pub const PublicKeyAlgorithm = enums.PublicKeyAlgorithm;
