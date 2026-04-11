@@ -152,7 +152,28 @@ pub fn compressData(
 
             return output.toOwnedSlice(allocator) catch return error.OutOfMemory;
         },
-        .bzip2 => return error.InvalidAlgorithm,
+        .bzip2 => {
+            // BZip2 compression (algorithm 3)
+            const bzip2 = @import("../crypto/bzip2.zig");
+            const compressed = bzip2.compress(allocator, data) catch
+                return error.CompressionFailed;
+            defer allocator.free(compressed);
+
+            const body_len = 1 + compressed.len;
+            var output: std.ArrayList(u8) = .empty;
+            errdefer output.deinit(allocator);
+
+            var hdr_buf: [6]u8 = undefined;
+            var hdr_fbs = std.io.fixedBufferStream(&hdr_buf);
+            header_mod.writeHeader(hdr_fbs.writer(), .compressed_data, @intCast(body_len)) catch
+                return error.Overflow;
+            output.appendSlice(allocator, hdr_fbs.getWritten()) catch return error.OutOfMemory;
+
+            output.append(allocator, 3) catch return error.OutOfMemory; // algorithm byte = 3 (BZip2)
+            output.appendSlice(allocator, compressed) catch return error.OutOfMemory;
+
+            return output.toOwnedSlice(allocator) catch return error.OutOfMemory;
+        },
         _ => return error.InvalidAlgorithm,
     }
 }

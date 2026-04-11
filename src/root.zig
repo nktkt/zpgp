@@ -83,6 +83,10 @@ pub const pkcs11_mod = @import("crypto/pkcs11.zig");
 
 // Smart card bridge
 pub const pcsc_bridge = @import("card/pcsc_bridge.zig");
+pub const yubikey = @import("card/yubikey.zig");
+
+// Certification Authority
+pub const openpgp_ca = @import("ca/openpgp_ca.zig");
 
 // Signature modules
 pub const subpackets = @import("signature/subpackets.zig");
@@ -115,6 +119,7 @@ pub const v6_import_export = @import("key/v6_import_export.zig");
 // Keyserver modules
 pub const hkp = @import("keyserver/hkp.zig");
 pub const hkp_client = @import("keyserver/hkp_client.zig");
+pub const hkp_http = @import("keyserver/hkp_http.zig");
 
 // Message modules
 pub const message = @import("message/message.zig");
@@ -157,6 +162,12 @@ pub const gpg_config = @import("config/gpg_config.zig");
 pub const error_report = @import("diag/error_report.zig");
 pub const operation_log = @import("diag/operation_log.zig");
 
+// Internationalization
+pub const i18n = @import("i18n/messages.zig");
+
+// WASM exports
+pub const wasm_exports = @import("wasm/exports.zig");
+
 // Benchmark framework
 pub const benchmark = @import("benchmark/bench.zig");
 
@@ -166,6 +177,7 @@ pub const key_migrate = @import("migrate/key_migrate.zig");
 // Compatibility layers
 pub const gnupg_compat = @import("compat/gnupg.zig");
 pub const sequoia_compat = @import("compat/sequoia.zig");
+pub const proton_compat = @import("compat/proton.zig");
 
 // Validation modules
 pub const key_validator = @import("validation/key_validator.zig");
@@ -211,6 +223,25 @@ pub const test_gnupg_interop = @import("test_gnupg_interop.zig");
 pub const test_security_hardening = @import("test_security_hardening.zig");
 pub const test_perf_regression = @import("test_perf_regression.zig");
 pub const test_hardware = @import("test_hardware.zig");
+pub const test_yubikey = @import("test_yubikey.zig");
+pub const test_ca = @import("test_ca.zig");
+pub const test_proton = @import("test_proton.zig");
+pub const test_aes192 = @import("test_aes192.zig");
+pub const test_bzip2_compress = @import("test_bzip2_compress.zig");
+pub const test_i18n = @import("test_i18n.zig");
+pub const test_interop_real = @import("test_interop_real.zig");
+
+// Format modules
+pub const gpg_agent_proto = @import("formats/gpg_agent.zig");
+pub const gpg_agent_conn = @import("formats/gpg_agent_conn.zig");
+
+// Test infrastructure
+pub const gpg_harness = @import("test/gpg_harness.zig");
+pub const fuzz_harness = @import("test/fuzz_harness.zig");
+
+// AES-192 and secret key decryption
+pub const aes192_mod = @import("crypto/aes192.zig");
+pub const secret_key_decrypt = @import("crypto/secret_key_decrypt.zig");
 
 // Re-exports for convenience.
 pub const PublicKeyAlgorithm = enums.PublicKeyAlgorithm;

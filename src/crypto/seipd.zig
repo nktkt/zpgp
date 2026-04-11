@@ -15,6 +15,7 @@ const Allocator = mem.Allocator;
 const SymmetricAlgorithm = @import("../types/enums.zig").SymmetricAlgorithm;
 const cfb_mod = @import("cfb.zig");
 const Aes128Cfb = cfb_mod.Aes128Cfb;
+const Aes192Cfb = cfb_mod.Aes192Cfb;
 const Aes256Cfb = cfb_mod.Aes256Cfb;
 const Cast5Cfb = cfb_mod.Cast5Cfb;
 const TwofishCfb = cfb_mod.TwofishCfb;
@@ -187,6 +188,10 @@ fn encryptCfb(sym_algo: SymmetricAlgorithm, key: []const u8, data: []u8) !void {
             var c = Aes128Cfb.init(key[0..16].*);
             c.encrypt(data);
         },
+        .aes192 => {
+            var c = Aes192Cfb.init(key[0..24].*);
+            c.encryptData(data);
+        },
         .aes256 => {
             var c = Aes256Cfb.init(key[0..32].*);
             c.encrypt(data);
@@ -208,6 +213,10 @@ fn decryptCfb(sym_algo: SymmetricAlgorithm, key: []const u8, data: []u8) !void {
     switch (sym_algo) {
         .aes128 => {
             var c = Aes128Cfb.init(key[0..16].*);
+            c.decrypt(data);
+        },
+        .aes192 => {
+            var c = Aes192Cfb.init(key[0..24].*);
             c.decrypt(data);
         },
         .aes256 => {

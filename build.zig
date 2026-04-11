@@ -71,4 +71,31 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // --- WASM build target ---
+    //
+    // Cross-compiles zpgp to wasm32-freestanding for use in browsers
+    // and other WASM runtimes. The entry point is src/wasm/exports.zig
+    // which re-exports key functions with WASM-compatible interfaces.
+    //
+    // Build: zig build wasm
+    // Output: zig-out/lib/zpgp.wasm
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    const wasm_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zpgp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm/exports.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+
+    const wasm_install = b.addInstallArtifact(wasm_lib, .{});
+    const wasm_step = b.step("wasm", "Build WASM library (wasm32-freestanding)");
+    wasm_step.dependOn(&wasm_install.step);
 }

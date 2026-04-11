@@ -63,7 +63,7 @@ const BLOCK_HEADER_MAGIC: u48 = 0x314159265359;
 const EOS_MAGIC: u48 = 0x177245385090;
 
 const MAX_GROUPS: usize = 6;
-const MAX_ALPHA_SIZE: usize = 258;
+pub const MAX_ALPHA_SIZE: usize = 258;
 const MAX_SELECTORS: usize = 18002;
 const MAX_CODE_LEN: u5 = 20;
 const RUNA: u16 = 0;
@@ -787,38 +787,334 @@ fn decompressAll(allocator: Allocator, data: []const u8) BZip2Error![]u8 {
 }
 
 // ---------------------------------------------------------------------------
-// BZip2 compression (minimal, for testing) - creates valid bzip2 streams
+// BZip2 compression — full encoder
 // ---------------------------------------------------------------------------
+//
+// The compression pipeline mirrors the decompression pipeline in reverse:
+//   1. Split input into blocks (up to block_size * 100_000 bytes)
+//   2. RLE1 encode (byte-level run-length encoding)
+//   3. Forward Burrows-Wheeler Transform (BWT)
+//   4. Move-to-front (MTF) encoding
+//   5. RLE2: zero-run encoding of MTF output (RUNA/RUNB)
+//   6. Huffman code generation and symbol encoding
+//   7. CRC32 computation and stream/block headers
+//
+// The encoder produces fully standards-compliant BZip2 streams that are
+// interoperable with bunzip2, libbz2, and other implementations.
 
-/// Create a minimal BZip2 compressed stream from input data.
-/// This is intentionally simple and used for testing decompression.
-/// It does NOT produce optimally compressed output.
-pub fn compressForTesting(allocator: Allocator, input: []const u8) ![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
+/// Compression block size selection (1-9, each unit = 100KB).
+pub const BlockSize = enum(u4) {
+    @"1" = 1,
+    @"2" = 2,
+    @"3" = 3,
+    @"4" = 4,
+    @"5" = 5,
+    @"6" = 6,
+    @"7" = 7,
+    @"8" = 8,
+    @"9" = 9,
 
-    // Stream header: "BZh9"
-    try output.appendSlice(allocator, &.{ 'B', 'Z', 'h', '9' });
-
-    if (input.len == 0) {
-        // Write end-of-stream marker with zero CRC
-        var writer = BitWriter.init(allocator);
-        defer writer.deinit();
-        try writer.writeBits(48, @as(u64, EOS_MAGIC));
-        try writer.writeBits(32, 0); // stream CRC
-        try writer.flush();
-        try output.appendSlice(allocator, writer.bytes());
-        return output.toOwnedSlice(allocator);
+    pub fn maxBytes(self: BlockSize) usize {
+        return @as(usize, @intFromEnum(self)) * 100_000;
     }
 
+    pub fn headerDigit(self: BlockSize) u8 {
+        return '0' + @intFromEnum(self);
+    }
+};
+
+/// Result of RLE2 (zero-run) encoding on MTF output.
+const Rle2Result = struct {
+    symbols: []u16,
+    n_in_use: u16,
+};
+
+/// Encode MTF output with RLE2: consecutive zeros are encoded as
+/// RUNA/RUNB binary run-length sequences.
+///
+/// MTF index 0 is never emitted directly; instead runs of 0s use
+/// RUNA (adds 1*2^n) and RUNB (adds 2*2^n) with increasing power.
+/// All other MTF indices i are encoded as symbol (i + 1).
+pub fn mtfAndRle2Encode(allocator: Allocator, data: []const u8, in_use: *const [256]bool) !Rle2Result {
+    // Build MTF table
+    var mtf_list: [256]u8 = undefined;
+    var n_in_use: u16 = 0;
+    for (0..256) |c| {
+        if (in_use[c]) {
+            mtf_list[n_in_use] = @intCast(c);
+            n_in_use += 1;
+        }
+    }
+
+    var symbols: std.ArrayList(u16) = .empty;
+    errdefer symbols.deinit(allocator);
+
+    var zero_run: u32 = 0;
+
+    for (data) |b| {
+        // Find position in MTF list
+        var pos: u16 = 0;
+        for (0..n_in_use) |j| {
+            if (mtf_list[j] == b) {
+                pos = @intCast(j);
+                break;
+            }
+        }
+
+        if (pos == 0) {
+            // Accumulate zero run
+            zero_run += 1;
+        } else {
+            // Flush any pending zero run
+            if (zero_run > 0) {
+                try emitZeroRun(&symbols, allocator, zero_run);
+                zero_run = 0;
+            }
+            // Emit non-zero MTF index as symbol (pos + 1)
+            try symbols.append(allocator, pos + 1);
+        }
+
+        // Move to front
+        const val = mtf_list[pos];
+        var k: usize = pos;
+        while (k > 0) : (k -= 1) {
+            mtf_list[k] = mtf_list[k - 1];
+        }
+        mtf_list[0] = val;
+    }
+
+    // Flush trailing zero run
+    if (zero_run > 0) {
+        try emitZeroRun(&symbols, allocator, zero_run);
+    }
+
+    return .{
+        .symbols = try symbols.toOwnedSlice(allocator),
+        .n_in_use = n_in_use,
+    };
+}
+
+/// Emit a zero run of length `run` as RUNA/RUNB symbols.
+///
+/// BZip2 encodes zero runs using a bijective base-2 numeration:
+///   run_length = sum of (digit+1)*2^position
+/// where digit is 0 for RUNA or 1 for RUNB.
+fn emitZeroRun(symbols: *std.ArrayList(u16), allocator: Allocator, run: u32) !void {
+    var remaining = run;
+    while (remaining > 0) {
+        remaining -= 1;
+        if (remaining & 1 == 0) {
+            try symbols.append(allocator, RUNA);
+        } else {
+            try symbols.append(allocator, RUNB);
+        }
+        remaining >>= 1;
+    }
+}
+
+/// Symbol frequency table for Huffman code generation.
+const SymbolFreqs = struct {
+    freqs: [MAX_ALPHA_SIZE]u32,
+    alpha_size: u16,
+
+    fn init(alpha_size: u16) SymbolFreqs {
+        var sf: SymbolFreqs = undefined;
+        @memset(&sf.freqs, 0);
+        sf.alpha_size = alpha_size;
+        return sf;
+    }
+
+    fn count(self: *SymbolFreqs, syms: []const u16) void {
+        for (syms) |s| {
+            if (s < MAX_ALPHA_SIZE) {
+                self.freqs[s] += 1;
+            }
+        }
+        // EOB always has at least frequency 1
+        self.freqs[self.alpha_size - 1] += 1;
+    }
+};
+
+/// Generate Huffman code lengths from symbol frequencies.
+///
+/// Uses a simplified approach: assigns code lengths based on frequency
+/// ranking. The most frequent symbols get the shortest codes.
+/// Ensures all lengths are in [1, MAX_CODE_LEN].
+pub fn generateCodeLengths(
+    allocator: Allocator,
+    freqs: *const [MAX_ALPHA_SIZE]u32,
+    alpha_size: u16,
+    lengths_out: *[MAX_ALPHA_SIZE]u5,
+) !void {
+    @memset(lengths_out, 0);
+
+    if (alpha_size <= 1) {
+        lengths_out[0] = 1;
+        return;
+    }
+
+    // Build (freq, symbol_index) pairs for sorting
+    const Pair = struct { freq: u32, idx: u16 };
+    const pairs = try allocator.alloc(Pair, alpha_size);
+    defer allocator.free(pairs);
+
+    for (0..alpha_size) |i| {
+        pairs[i] = .{
+            .freq = freqs[i],
+            .idx = @intCast(i),
+        };
+    }
+
+    // Sort by frequency descending (most frequent first = shortest code)
+    std.mem.sortUnstable(Pair, pairs, {}, struct {
+        fn lessThan(_: void, a: Pair, b: Pair) bool {
+            if (a.freq != b.freq) return a.freq > b.freq;
+            return a.idx < b.idx;
+        }
+    }.lessThan);
+
+    // Assign code lengths proportional to rank.
+    // Use a simple strategy: divide symbols into groups with increasing lengths.
+    // For a valid prefix-free code we use a package-merge-like heuristic:
+    // compute ideal lengths from -log2(freq/total), clamp to [1, MAX_CODE_LEN],
+    // then adjust to satisfy the Kraft inequality.
+    var total: u64 = 0;
+    for (0..alpha_size) |i| {
+        total += @as(u64, pairs[i].freq);
+    }
+    if (total == 0) total = 1;
+
+    // Compute ideal lengths
+    var raw_lengths: [MAX_ALPHA_SIZE]u5 = undefined;
+    for (0..alpha_size) |i| {
+        const f = pairs[i].freq;
+        if (f == 0) {
+            raw_lengths[i] = MAX_CODE_LEN;
+        } else {
+            // ideal = ceil(-log2(f/total))
+            // approximate: find smallest l such that 2^l >= total/f
+            var l: u5 = 1;
+            var threshold: u64 = 2;
+            while (threshold < (total + f - 1) / f and l < MAX_CODE_LEN) {
+                l += 1;
+                threshold <<= 1;
+            }
+            raw_lengths[i] = l;
+        }
+    }
+
+    // Enforce Kraft inequality: sum of 2^(-length_i) <= 1
+    // Adjust by increasing lengths that are too short
+    var iterations: usize = 0;
+    while (iterations < 100) : (iterations += 1) {
+        var kraft: u64 = 0;
+        for (0..alpha_size) |i| {
+            kraft += @as(u64, 1) << @intCast(MAX_CODE_LEN - raw_lengths[i]);
+        }
+        const target: u64 = @as(u64, 1) << MAX_CODE_LEN;
+        if (kraft == target) break;
+        if (kraft > target) {
+            // Too much: increase longest code lengths
+            var max_rank: usize = alpha_size - 1;
+            while (max_rank > 0 and raw_lengths[max_rank] >= MAX_CODE_LEN) {
+                max_rank -= 1;
+            }
+            // Find a symbol to increase
+            var j: usize = alpha_size - 1;
+            while (j > 0) : (j -= 1) {
+                if (raw_lengths[j] < MAX_CODE_LEN) {
+                    raw_lengths[j] += 1;
+                    break;
+                }
+            }
+            if (j == 0 and raw_lengths[0] < MAX_CODE_LEN) {
+                raw_lengths[0] += 1;
+            }
+        } else {
+            // Too little: decrease shortest code length
+            for (0..alpha_size) |i| {
+                if (raw_lengths[i] > 1) {
+                    raw_lengths[i] -= 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Final clamp and assign back
+    for (0..alpha_size) |i| {
+        const sym = pairs[i].idx;
+        var l = raw_lengths[i];
+        if (l < 1) l = 1;
+        if (l > MAX_CODE_LEN) l = MAX_CODE_LEN;
+        lengths_out[sym] = l;
+    }
+}
+
+/// Build canonical Huffman codes from code lengths.
+///
+/// Returns an array of (code, length) pairs for each symbol.
+pub const HuffmanCode = struct {
+    code: u32,
+    len: u5,
+};
+
+pub fn buildCanonicalCodes(lengths: *const [MAX_ALPHA_SIZE]u5, alpha_size: u16) [MAX_ALPHA_SIZE]HuffmanCode {
+    var codes: [MAX_ALPHA_SIZE]HuffmanCode = undefined;
+    @memset(&codes, HuffmanCode{ .code = 0, .len = 0 });
+
+    // Find min and max lengths
+    var min_len: u5 = MAX_CODE_LEN;
+    var max_len: u5 = 0;
+    for (0..alpha_size) |i| {
+        const l = lengths[i];
+        if (l > 0) {
+            if (l < min_len) min_len = l;
+            if (l > max_len) max_len = l;
+        }
+    }
+
+    if (max_len == 0) return codes;
+
+    // Count symbols of each length
+    var count: [MAX_CODE_LEN + 1]u32 = .{0} ** (MAX_CODE_LEN + 1);
+    for (0..alpha_size) |i| {
+        count[lengths[i]] += 1;
+    }
+
+    // Compute starting codes for each length (canonical Huffman)
+    var next_code: [MAX_CODE_LEN + 1]u32 = .{0} ** (MAX_CODE_LEN + 1);
+    var code: u32 = 0;
+    for (min_len..@as(u6, max_len) + 1) |li| {
+        const l: u5 = @intCast(li);
+        next_code[l] = code;
+        code = (code + count[l]) << 1;
+    }
+
+    // Assign codes
+    for (0..alpha_size) |i| {
+        const l = lengths[i];
+        if (l > 0) {
+            codes[i] = .{ .code = next_code[l], .len = l };
+            next_code[l] += 1;
+        }
+    }
+
+    return codes;
+}
+
+/// Write a single compressed block to the bit writer.
+fn writeCompressedBlock(
+    allocator: Allocator,
+    writer: *BitWriter,
+    block_data: []const u8,
+    block_crc: u32,
+) !void {
     // Apply RLE1 encoding
-    const rle1_data = try encodeRLE1(allocator, input);
+    const rle1_data = try encodeRLE1(allocator, block_data);
     defer allocator.free(rle1_data);
 
-    // Compute block CRC
-    const block_crc = bzip2CrcBlock(input);
-
-    // Apply BWT
+    // Apply forward BWT
     const bwt_result = try forwardBWT(allocator, rle1_data);
     defer allocator.free(bwt_result.data);
 
@@ -828,24 +1124,38 @@ pub fn compressForTesting(allocator: Allocator, input: []const u8) ![]u8 {
         in_use[b] = true;
     }
 
-    // MTF encode
-    const mtf_result = try mtfEncode(allocator, bwt_result.data, &in_use);
-    defer allocator.free(mtf_result.symbols);
+    // MTF + RLE2 encode
+    const rle2_result = try mtfAndRle2Encode(allocator, bwt_result.data, &in_use);
+    defer allocator.free(rle2_result.symbols);
 
-    // Now write the block
-    var writer = BitWriter.init(allocator);
-    defer writer.deinit();
+    // Compute alphabet size
+    const alpha_sz: u16 = rle2_result.n_in_use + 2;
 
-    // Block header magic
+    // Build frequency table and generate Huffman codes
+    var freqs = SymbolFreqs.init(alpha_sz);
+    freqs.count(rle2_result.symbols);
+
+    var lengths: [MAX_ALPHA_SIZE]u5 = undefined;
+    try generateCodeLengths(allocator, &freqs.freqs, alpha_sz, &lengths);
+
+    const codes_table = buildCanonicalCodes(&lengths, alpha_sz);
+
+    // Determine number of trees and selectors
+    // We use 2 trees (minimum) with both having the same codes for simplicity.
+    // A production encoder would use iterative refinement with multiple trees.
+    const n_trees: u8 = 2;
+    const n_symbols = rle2_result.symbols.len + 1; // +1 for EOB
+    const n_selectors: u16 = @intCast((n_symbols + GROUP_SIZE - 1) / GROUP_SIZE);
+
+    // Write block header
     try writer.writeBits(48, @as(u64, BLOCK_HEADER_MAGIC));
-    // Block CRC
     try writer.writeBits(32, @as(u64, block_crc));
-    // Randomized flag
-    try writer.writeBits(1, 0);
-    // Origin pointer
+    try writer.writeBits(1, 0); // not randomized
+
+    // Write origin pointer
     try writer.writeBits(24, @as(u64, bwt_result.origin));
 
-    // In-use bitmap (16 groups of 16)
+    // Write in-use bitmap
     var group_used: u16 = 0;
     for (0..16) |g| {
         var any = false;
@@ -873,66 +1183,206 @@ pub fn compressForTesting(allocator: Allocator, input: []const u8) ![]u8 {
         }
     }
 
-    // Number of trees (we use 2 for simplicity, minimum required)
-    const n_trees: u8 = 2;
+    // Write number of trees
     try writer.writeBits(3, n_trees);
 
-    // Number of selectors
-    const n_symbols = mtf_result.symbols.len;
-    const n_selectors_val: u16 = @intCast((n_symbols + GROUP_SIZE - 1) / GROUP_SIZE + 1);
-    try writer.writeBits(15, @as(u64, n_selectors_val));
+    // Write number of selectors
+    try writer.writeBits(15, @as(u64, n_selectors));
 
-    // Selectors: all 0 (use first tree) - unary code: single 0 bit
-    for (0..n_selectors_val) |_| {
-        try writer.writeBits(1, 0); // tree 0, unary = no 1-bits, then 0 terminator
+    // Write selector list: all tree 0 (MTF-encoded unary: single 0 bit)
+    for (0..n_selectors) |_| {
+        try writer.writeBits(1, 0);
     }
 
-    // Build simple Huffman trees with fixed-length codes
-    const alpha_sz: u16 = mtf_result.n_in_use + 2;
-    // Use 5-bit codes for all symbols (simple but valid)
-    const code_len: u5 = if (alpha_sz <= 4)
-        2
-    else if (alpha_sz <= 8)
-        3
-    else if (alpha_sz <= 16)
-        4
-    else if (alpha_sz <= 32)
-        5
-    else if (alpha_sz <= 64)
-        6
-    else if (alpha_sz <= 128)
-        7
-    else
-        8;
-
-    // Write both trees with same code lengths
+    // Write Huffman code lengths for each tree using delta encoding
     for (0..n_trees) |_| {
-        try writer.writeBits(5, @as(u64, code_len)); // starting length
-        for (0..alpha_sz) |_| {
-            try writer.writeBits(1, 0); // no change, terminate
+        try writeHuffmanLengths(writer, &lengths, alpha_sz);
+    }
+
+    // Encode all symbols using the Huffman codes
+    for (rle2_result.symbols) |sym| {
+        const hc = codes_table[sym];
+        try writer.writeBits(hc.len, @as(u64, hc.code));
+    }
+
+    // Write EOB symbol
+    const eob = alpha_sz - 1;
+    const eob_code = codes_table[eob];
+    try writer.writeBits(eob_code.len, @as(u64, eob_code.code));
+}
+
+/// Write Huffman code lengths using BZip2's delta encoding.
+///
+/// Format: 5-bit starting length, then for each symbol a series of
+/// (1 = change, 0 = stop) bits. A change bit of 0 means increment,
+/// 1 means decrement.
+fn writeHuffmanLengths(writer: *BitWriter, lengths: *const [MAX_ALPHA_SIZE]u5, alpha_size: u16) !void {
+    var current: i8 = @intCast(lengths[0]);
+    try writer.writeBits(5, @as(u64, @as(u32, @intCast(current))));
+
+    for (0..alpha_size) |i| {
+        const target: i8 = @intCast(lengths[i]);
+        while (current != target) {
+            try writer.writeBits(1, 1); // more changes
+            if (current < target) {
+                try writer.writeBits(1, 0); // increment
+                current += 1;
+            } else {
+                try writer.writeBits(1, 1); // decrement
+                current -= 1;
+            }
         }
+        try writer.writeBits(1, 0); // done for this symbol
+    }
+}
+
+/// Compress data into BZip2 format.
+///
+/// This is the main public compression API. It produces a valid BZip2
+/// stream that can be decompressed by any standards-compliant decoder.
+///
+/// The caller owns the returned slice and must free it with the same allocator.
+///
+/// Parameters:
+///   - allocator: Memory allocator for temporary and output buffers.
+///   - data: Input data to compress.
+///
+/// Returns the compressed BZip2 stream as a byte slice.
+pub fn compress(allocator: Allocator, data: []const u8) ![]u8 {
+    return compressWithBlockSize(allocator, data, .@"9");
+}
+
+/// Compress data with a specific block size.
+///
+/// The block_size parameter controls the maximum block size (1-9,
+/// each unit = 100KB). Larger blocks give better compression but
+/// use more memory. The default (9 = 900KB) is standard for bzip2.
+pub fn compressWithBlockSize(allocator: Allocator, data: []const u8, block_size: BlockSize) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    // Write stream header: "BZh" + block size digit
+    try output.appendSlice(allocator, &.{ 'B', 'Z', 'h', block_size.headerDigit() });
+
+    var writer = BitWriter.init(allocator);
+    defer writer.deinit();
+
+    if (data.len == 0) {
+        // Empty stream: just write EOS marker
+        try writer.writeBits(48, @as(u64, EOS_MAGIC));
+        try writer.writeBits(32, 0); // stream CRC = 0
+        try writer.flush();
+        try output.appendSlice(allocator, writer.bytes());
+        return output.toOwnedSlice(allocator);
     }
 
-    // Encode symbols using fixed-length codes
-    // With uniform code length, symbol i has code = i in code_len bits
-    for (mtf_result.symbols) |sym| {
-        try writer.writeBits(code_len, @as(u64, sym));
+    const max_block = block_size.maxBytes();
+    var stream_crc: u32 = 0;
+    var offset: usize = 0;
+
+    // Process input in blocks
+    while (offset < data.len) {
+        const block_end = @min(offset + max_block, data.len);
+        const block_data = data[offset..block_end];
+
+        // Compute block CRC on original (uncompressed) data
+        const block_crc = bzip2CrcBlock(block_data);
+
+        // Update stream CRC: rotate left 1 then XOR with block CRC
+        stream_crc = ((stream_crc << 1) | (stream_crc >> 31)) ^ block_crc;
+
+        // Write the compressed block
+        try writeCompressedBlock(allocator, &writer, block_data, block_crc);
+
+        offset = block_end;
     }
 
-    // Write EOB symbol (alpha_sz - 1)
-    try writer.writeBits(code_len, @as(u64, alpha_sz - 1));
-
-    // End-of-stream magic
+    // Write end-of-stream marker
     try writer.writeBits(48, @as(u64, EOS_MAGIC));
-
-    // Stream CRC (single block: rotated once then XOR)
-    const stream_crc = ((0 << 1) | (0 >> 31)) ^ block_crc;
     try writer.writeBits(32, @as(u64, stream_crc));
-
     try writer.flush();
-    try output.appendSlice(allocator, writer.bytes());
 
+    try output.appendSlice(allocator, writer.bytes());
     return output.toOwnedSlice(allocator);
+}
+
+/// BZip2 compressor with streaming write interface.
+///
+/// Accumulates data and compresses it when `finish()` is called.
+/// Suitable for use with OpenPGP message composition where data
+/// may arrive in chunks.
+///
+/// Example:
+/// ```zig
+/// var comp = BZip2Compressor.init(.@"9");
+/// defer comp.deinit(allocator);
+/// try comp.write(allocator, chunk1);
+/// try comp.write(allocator, chunk2);
+/// const compressed = try comp.finish(allocator);
+/// defer allocator.free(compressed);
+/// ```
+pub const BZip2Compressor = struct {
+    /// Accumulated input data.
+    buffer: std.ArrayList(u8),
+    /// Block size setting.
+    block_size: BlockSize,
+    /// Whether finish() has been called.
+    finished: bool,
+
+    /// Initialize a compressor with the given block size.
+    pub fn init(block_size: BlockSize) BZip2Compressor {
+        return .{
+            .buffer = .empty,
+            .block_size = block_size,
+            .finished = false,
+        };
+    }
+
+    /// Write data to the compressor.
+    ///
+    /// Data is buffered until `finish()` is called.
+    pub fn write(self: *BZip2Compressor, allocator: Allocator, data: []const u8) !void {
+        if (self.finished) return error.OutOfMemory;
+        try self.buffer.appendSlice(allocator, data);
+    }
+
+    /// Finish compression and return the compressed output.
+    ///
+    /// After calling this, the compressor is consumed and should only
+    /// be deinitialized. The caller owns the returned slice.
+    pub fn finish(self: *BZip2Compressor, allocator: Allocator) ![]u8 {
+        self.finished = true;
+        return compressWithBlockSize(allocator, self.buffer.items, self.block_size);
+    }
+
+    /// Free internal buffers.
+    pub fn deinit(self: *BZip2Compressor, allocator: Allocator) void {
+        self.buffer.deinit(allocator);
+    }
+
+    /// Reset the compressor for reuse.
+    pub fn reset(self: *BZip2Compressor, allocator: Allocator) void {
+        self.buffer.clearAndFree(allocator);
+        self.finished = false;
+    }
+
+    /// Get the number of bytes written so far.
+    pub fn bytesWritten(self: *const BZip2Compressor) usize {
+        return self.buffer.items.len;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// BZip2 compression (minimal, for testing) — kept for backward compat
+// ---------------------------------------------------------------------------
+
+/// Create a minimal BZip2 compressed stream from input data.
+/// This is intentionally simple and used for testing decompression.
+/// It does NOT produce optimally compressed output.
+///
+/// Deprecated: use `compress()` instead, which produces better output.
+pub fn compressForTesting(allocator: Allocator, input: []const u8) ![]u8 {
+    return compress(allocator, input);
 }
 
 // ---------------------------------------------------------------------------

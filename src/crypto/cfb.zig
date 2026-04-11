@@ -157,10 +157,12 @@ const Twofish = @import("twofish.zig").Twofish;
 const TripleDes = @import("triple_des.zig").TripleDes;
 const Idea = @import("idea.zig").Idea;
 const Blowfish = @import("blowfish.zig").Blowfish;
+const Aes192 = @import("aes192.zig").Aes192;
 const Camellia128 = @import("camellia.zig").Camellia128;
 const Camellia192 = @import("camellia.zig").Camellia192;
 const Camellia256 = @import("camellia.zig").Camellia256;
 
+pub const Aes192Cfb = OpenPgpCfbDirect(Aes192);
 pub const Cast5Cfb = OpenPgpCfbDirect(Cast5);
 pub const TwofishCfb = OpenPgpCfbDirect(Twofish);
 pub const TripleDesCfb = OpenPgpCfbDirect(TripleDes);

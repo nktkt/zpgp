@@ -22,6 +22,22 @@ const Key = @import("key.zig").Key;
 const UserIdBinding = @import("key.zig").UserIdBinding;
 const SubkeyBinding = @import("key.zig").SubkeyBinding;
 const armor = @import("../armor/armor.zig");
+const SymmetricAlgorithm = @import("../types/enums.zig").SymmetricAlgorithm;
+const secret_key_decrypt = @import("../crypto/secret_key_decrypt.zig");
+
+/// A key pair consisting of a public key (with user IDs, subkeys, etc.)
+/// and the decrypted secret key material.
+pub const KeyPair = struct {
+    /// The assembled public key structure.
+    key: Key,
+    /// Decrypted primary secret key MPI data (owned by allocator).
+    secret_data: ?[]u8,
+
+    pub fn deinit(self: *KeyPair, allocator: Allocator) void {
+        if (self.secret_data) |sd| allocator.free(sd);
+        self.key.deinit(allocator);
+    }
+};
 
 pub const ImportExportError = error{
     InvalidPacket,
@@ -274,6 +290,257 @@ pub fn importPublicKeyAuto(allocator: Allocator, data: []const u8) ImportExportE
 
     return importPublicKey(allocator, data);
 }
+
+/// Import a secret key with passphrase-based decryption.
+///
+/// Reads an OpenPGP transferable secret key (which may be armored or binary),
+/// locates the secret key packet, and decrypts the secret key material
+/// using the provided passphrase.
+///
+/// The returned `KeyPair` contains both the assembled public key structure
+/// and the decrypted secret key MPI data.
+pub fn importSecretKeyWithPassphrase(
+    allocator: Allocator,
+    data: []const u8,
+    passphrase: []const u8,
+) ImportSecretKeyError!KeyPair {
+    // Dearmor if necessary
+    var binary_data: []const u8 = data;
+    var decode_result: ?armor.DecodeResult = null;
+    defer {
+        if (decode_result) |*dr| dr.deinit();
+    }
+
+    if (data.len > 10 and mem.startsWith(u8, data, "-----BEGIN ")) {
+        decode_result = armor.decode(allocator, data) catch {
+            return error.MalformedKey;
+        };
+        binary_data = decode_result.?.data;
+    }
+
+    var fbs = std.io.fixedBufferStream(binary_data);
+    const reader = fbs.reader();
+
+    // Read the first packet: must be a secret key (tag 5)
+    const first_hdr = header_mod.readHeader(reader) catch |err| {
+        return switch (err) {
+            error.EndOfStream => error.MalformedKey,
+            error.InvalidPacketTag => error.InvalidPacketTag,
+        };
+    };
+
+    if (first_hdr.tag != .secret_key) return error.NotASecretKey;
+
+    const sk_body_len: usize = switch (first_hdr.body_length) {
+        .fixed => |len| len,
+        else => return error.MalformedKey,
+    };
+
+    if (fbs.pos + sk_body_len > binary_data.len) return error.MalformedKey;
+    const sk_body = binary_data[fbs.pos .. fbs.pos + sk_body_len];
+    fbs.pos += sk_body_len;
+
+    // Parse the secret key packet
+    const sk_packet = SecretKeyPacket.parse(allocator, sk_body, false) catch
+        return error.InvalidPacket;
+    // Note: we must be careful about ownership. Key.init copies the
+    // PublicKeyPacket struct (which shares slice pointers with
+    // sk_packet.public_key). To avoid a double-free when Key.deinit
+    // frees both primary_key and secret_key.public_key, we do NOT
+    // store the SecretKeyPacket in key.secret_key. Instead, we keep
+    // the sk_packet alive for reading S2K/IV/encrypted data, then
+    // free only the secret-key-specific fields afterwards.
+    var key = Key.init(sk_packet.public_key);
+    errdefer key.deinit(allocator);
+
+    // We'll free the secret-key-only fields manually after decryption.
+    // The public_key portion is now owned by `key.primary_key`.
+    defer {
+        if (sk_packet.s2k_data) |s| allocator.free(s);
+        if (sk_packet.iv) |v| allocator.free(v);
+        if (sk_packet.secret_data.len > 0) allocator.free(sk_packet.secret_data);
+        if (sk_packet.checksum_data.len > 0) allocator.free(sk_packet.checksum_data);
+    }
+
+    // Parse remaining packets (user IDs, signatures, subkeys)
+    var current_uid: ?UserIdBinding = null;
+    var pending_uid = false;
+
+    while (true) {
+        const hdr = header_mod.readHeader(reader) catch |err| {
+            switch (err) {
+                error.EndOfStream => break,
+                error.InvalidPacketTag => return error.InvalidPacketTag,
+            }
+        };
+
+        const body_len: usize = switch (hdr.body_length) {
+            .fixed => |len| len,
+            else => return error.MalformedKey,
+        };
+
+        if (fbs.pos + body_len > binary_data.len) return error.MalformedKey;
+        const body = binary_data[fbs.pos .. fbs.pos + body_len];
+        fbs.pos += body_len;
+
+        switch (hdr.tag) {
+            .user_id => {
+                if (pending_uid) {
+                    if (current_uid) |uid| {
+                        key.addUserId(allocator, uid) catch return error.OutOfMemory;
+                    }
+                }
+                const uid_pkt = UserIdPacket.parse(allocator, body) catch
+                    return error.InvalidPacket;
+                current_uid = .{
+                    .user_id = uid_pkt,
+                    .self_signature = null,
+                    .certifications = .empty,
+                };
+                pending_uid = true;
+            },
+            .signature => {
+                const sig = SignaturePacket.parse(allocator, body) catch
+                    return error.InvalidPacket;
+
+                if (pending_uid) {
+                    if (current_uid) |*uid| {
+                        if (sig.sig_type >= 0x10 and sig.sig_type <= 0x13) {
+                            if (uid.self_signature == null) {
+                                uid.self_signature = sig;
+                            } else {
+                                uid.certifications.append(allocator, sig) catch
+                                    return error.OutOfMemory;
+                            }
+                        } else {
+                            uid.certifications.append(allocator, sig) catch
+                                return error.OutOfMemory;
+                        }
+                    }
+                } else {
+                    if (key.subkeys.items.len > 0) {
+                        const last = &key.subkeys.items[key.subkeys.items.len - 1];
+                        if (last.binding_signature == null) {
+                            last.binding_signature = sig;
+                        } else {
+                            sig.deinit(allocator);
+                        }
+                    } else {
+                        sig.deinit(allocator);
+                    }
+                }
+            },
+            .secret_subkey => {
+                if (pending_uid) {
+                    if (current_uid) |uid| {
+                        key.addUserId(allocator, uid) catch return error.OutOfMemory;
+                    }
+                    current_uid = null;
+                    pending_uid = false;
+                }
+
+                // Parse as secret subkey, extract public portion.
+                // We don't store the SecretKeyPacket in SubkeyBinding
+                // to avoid double-free (public_key is shared).
+                const sub_sk = SecretKeyPacket.parse(allocator, body, true) catch
+                    return error.InvalidPacket;
+                // Free only the secret-key specific fields
+                if (sub_sk.s2k_data) |s| allocator.free(s);
+                if (sub_sk.iv) |v| allocator.free(v);
+                if (sub_sk.secret_data.len > 0) allocator.free(sub_sk.secret_data);
+                if (sub_sk.checksum_data.len > 0) allocator.free(sub_sk.checksum_data);
+
+                key.addSubkey(allocator, .{
+                    .key = sub_sk.public_key,
+                    .secret_key = null,
+                    .binding_signature = null,
+                }) catch return error.OutOfMemory;
+            },
+            .public_subkey => {
+                if (pending_uid) {
+                    if (current_uid) |uid| {
+                        key.addUserId(allocator, uid) catch return error.OutOfMemory;
+                    }
+                    current_uid = null;
+                    pending_uid = false;
+                }
+
+                const sub_pk = PublicKeyPacket.parse(allocator, body, true) catch
+                    return error.InvalidPacket;
+                key.addSubkey(allocator, .{
+                    .key = sub_pk,
+                    .secret_key = null,
+                    .binding_signature = null,
+                }) catch return error.OutOfMemory;
+            },
+            else => {},
+        }
+    }
+
+    if (pending_uid) {
+        if (current_uid) |uid| {
+            key.addUserId(allocator, uid) catch return error.OutOfMemory;
+        }
+    }
+
+    // Decrypt the secret key material if it is protected
+    var decrypted_data: ?[]u8 = null;
+    errdefer if (decrypted_data) |dd| allocator.free(dd);
+
+    if (sk_packet.s2k_usage != 0) {
+        const sym_algo = sk_packet.symmetric_algo orelse return error.DecryptionFailed;
+        const iv_data = sk_packet.iv orelse return error.DecryptionFailed;
+        const s2k_bytes = sk_packet.s2k_data orelse return error.DecryptionFailed;
+
+        // For s2k_usage 254: secret_data is the encrypted portion, checksum_data is separate
+        // But our SecretKeyPacket parser already splits them. We need to reassemble.
+        var encrypted_total: []u8 = undefined;
+        var need_free_encrypted = false;
+
+        if (sk_packet.checksum_data.len > 0) {
+            // Reassemble: encrypted = secret_data + checksum_data
+            const total_len = sk_packet.secret_data.len + sk_packet.checksum_data.len;
+            encrypted_total = allocator.alloc(u8, total_len) catch return error.OutOfMemory;
+            need_free_encrypted = true;
+            @memcpy(encrypted_total[0..sk_packet.secret_data.len], sk_packet.secret_data);
+            @memcpy(encrypted_total[sk_packet.secret_data.len..], sk_packet.checksum_data);
+        } else {
+            encrypted_total = allocator.dupe(u8, sk_packet.secret_data) catch return error.OutOfMemory;
+            need_free_encrypted = true;
+        }
+        defer if (need_free_encrypted) allocator.free(encrypted_total);
+
+        decrypted_data = secret_key_decrypt.decryptSecretKey(
+            allocator,
+            encrypted_total,
+            passphrase,
+            sym_algo,
+            iv_data,
+            s2k_bytes,
+            sk_packet.s2k_usage,
+        ) catch return error.DecryptionFailed;
+    } else {
+        // Unencrypted: secret_data is already plaintext
+        decrypted_data = allocator.dupe(u8, sk_packet.secret_data) catch return error.OutOfMemory;
+    }
+
+    return .{
+        .key = key,
+        .secret_data = decrypted_data,
+    };
+}
+
+pub const ImportSecretKeyError = error{
+    InvalidPacket,
+    UnsupportedVersion,
+    InvalidPacketTag,
+    MalformedKey,
+    NotASecretKey,
+    OutOfMemory,
+    Overflow,
+    NoSpaceLeft,
+    DecryptionFailed,
+};
 
 /// Write a single packet (header + body) to the output buffer.
 fn writePacket(
